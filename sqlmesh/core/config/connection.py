@@ -1353,6 +1353,14 @@ class AzureSQLConnectionConfig(MSSQLConnectionConfig):
     def _extra_engine_config(self) -> t.Dict[str, t.Any]:
         return {"catalog_support": CatalogSupport.SINGLE_CATALOG_ONLY}
 
+class FabricSQLConnectionConfig(MSSQLConnectionConfig):
+    type_: t.Literal["fabric"] = Field(alias="type", default="fabric")  # type: ignore
+    driver: t.Optional[str] = "pyodbc"
+
+    @property
+    def _extra_engine_config(self) -> t.Dict[str, t.Any]:
+        return {"catalog_support": CatalogSupport.SINGLE_CATALOG_ONLY}
+
 
 class SparkConnectionConfig(ConnectionConfig):
     """
