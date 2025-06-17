@@ -38,19 +38,28 @@ class FabricWarehouseAdapter(MSSQLEngineAdapter):
     def _get_schema_name(self, name: t.Union[TableName, SchemaName]) -> str:
         """Extracts the schema name from a sqlglot object or string."""
         table = exp.to_table(name)
-        schema_part = table.db
 
-        if isinstance(schema_part, exp.Identifier):
-            return schema_part.name
-        if isinstance(schema_part, str):
-            return schema_part
+        # Handle case where db part contains the schema name
+        if table.db:
+            if isinstance(table.db, exp.Identifier):
+                return table.db.name
+            if isinstance(table.db, str):
+                return table.db
 
-        if schema_part is None and table.this and table.this.is_identifier:
+        # Handle case where the name is just a schema name (no table part)
+        if table.this and hasattr(table.this, "name") and not table.db:
             return table.this.name
 
-        raise ValueError(f"Could not determine schema name from '{name}'")
+        # If we can't determine the schema, provide a more informative error
+        raise ValueError(f"Could not determine schema name from '{name}'. Parsed table: {table}")
 
-    def create_schema(self, schema: SchemaName) -> None:
+    def create_schema(
+        self,
+        schema_name: SchemaName,
+        ignore_if_exists: bool = True,
+        warn_on_error: bool = True,
+        properties: t.Optional[t.List[exp.Expression]] = None,
+    ) -> None:
         """
         Creates a schema in a Microsoft Fabric Warehouse.
 
@@ -59,15 +68,25 @@ class FabricWarehouseAdapter(MSSQLEngineAdapter):
         implementation first checks for the schema's existence in the
         `INFORMATION_SCHEMA.SCHEMATA` view.
         """
+        # Extract schema name if it's a complex object
+        if isinstance(schema_name, (exp.Table, exp.Identifier)):
+            schema_name_str = self._get_schema_name(schema_name)
+        else:
+            schema_name_str = str(schema_name)
+
+        # Validate schema name is not empty
+        if not schema_name_str or schema_name_str.strip() == "":
+            raise ValueError(f"Invalid empty schema name extracted from: {schema_name}")
+
         sql = (
             exp.select("1")
             .from_(f"{self.database}.INFORMATION_SCHEMA.SCHEMATA")
-            .where(f"SCHEMA_NAME = '{schema}'")
+            .where(f"SCHEMA_NAME = '{schema_name_str}'")
         )
         if self.fetchone(sql):
             return
         self.execute(f"USE [{self.database}]")
-        self.execute(f"CREATE SCHEMA [{schema}]")
+        self.execute(f"CREATE SCHEMA [{schema_name_str}]")
 
     def _create_table_from_columns(
         self,
