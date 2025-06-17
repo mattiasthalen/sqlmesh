@@ -152,7 +152,15 @@ class FabricWarehouseAdapter(MSSQLEngineAdapter):
     def _fully_qualify(self, name: t.Union[TableName, SchemaName]) -> exp.Table:
         """Ensures an object name is prefixed with the configured database."""
         table = exp.to_table(name)
-        return exp.Table(this=table.this, db=table.db, catalog=exp.to_identifier(self.database))
+        # Ensure we always have a catalog (database) set
+        catalog = table.catalog or exp.to_identifier(self.database)
+        # Ensure we have a schema (db) set - if not provided, try to extract it
+        schema = table.db
+        if not schema and table.this:
+            # If no schema provided and we have a table name, we might need a default schema
+            # For now, keep the original behavior but ensure catalog is set
+            pass
+        return exp.Table(this=table.this, db=schema, catalog=catalog)
 
     def create_view(
         self,
@@ -250,3 +258,33 @@ class FabricWarehouseAdapter(MSSQLEngineAdapter):
                     columns_to_types=columns_to_types,
                     order_projections=False,
                 )
+
+    def _to_sql(self, expression: exp.Expression, quote: bool = True, **kwargs: t.Any) -> str:
+        """
+        Override SQL generation to fix Fabric-specific issues.
+
+        Specifically, replace unqualified information_schema references with
+        database-qualified ones for compatibility with Fabric Warehouse.
+        """
+        sql = super()._to_sql(expression, quote=quote, **kwargs)
+
+        # Fix the IF NOT EXISTS pattern to use database-qualified INFORMATION_SCHEMA
+        # Replace: information_schema.tables
+        # With: {database}.INFORMATION_SCHEMA.TABLES
+        if "information_schema.tables" in sql.lower():
+            # Case-insensitive replacement maintaining the original case pattern
+            import re
+
+            pattern = r"\binformation_schema\.tables\b"
+            replacement = f"{self.database}.INFORMATION_SCHEMA.TABLES"
+            sql = re.sub(pattern, replacement, sql, flags=re.IGNORECASE)
+
+        # Also fix references to information_schema.schemata if they exist
+        if "information_schema.schemata" in sql.lower():
+            import re
+
+            pattern = r"\binformation_schema\.schemata\b"
+            replacement = f"{self.database}.INFORMATION_SCHEMA.SCHEMATA"
+            sql = re.sub(pattern, replacement, sql, flags=re.IGNORECASE)
+
+        return sql
