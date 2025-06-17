@@ -41,16 +41,24 @@ class FabricWarehouseAdapter(MSSQLEngineAdapter):
         schema_part = table.db
 
         if isinstance(schema_part, exp.Identifier):
-            return schema_part.name
-        if isinstance(schema_part, str):
-            return schema_part
+            schema_name = schema_part.name
+        elif isinstance(schema_part, str):
+            schema_name = schema_part
+        elif schema_part is None and table.this and table.this.is_identifier:
+            schema_name = table.this.name
+        else:
+            schema_name = None
 
-        if schema_part is None and table.this and table.this.is_identifier:
-            return table.this.name
+        # Return 'dbo' as the default schema for Fabric if schema is empty or None
+        return schema_name if schema_name else "dbo"
 
-        raise ValueError(f"Could not determine schema name from '{name}'")
-
-    def create_schema(self, schema: SchemaName) -> None:
+    def create_schema(
+        self,
+        schema_name: SchemaName,
+        ignore_if_exists: bool = True,
+        warn_on_error: bool = True,
+        properties: t.Optional[t.List[exp.Expression]] = None,
+    ) -> None:
         """
         Creates a schema in a Microsoft Fabric Warehouse.
 
@@ -62,12 +70,12 @@ class FabricWarehouseAdapter(MSSQLEngineAdapter):
         sql = (
             exp.select("1")
             .from_(f"{self.database}.INFORMATION_SCHEMA.SCHEMATA")
-            .where(f"SCHEMA_NAME = '{schema}'")
+            .where(f"SCHEMA_NAME = '{schema_name}'")
         )
         if self.fetchone(sql):
             return
         self.execute(f"USE [{self.database}]")
-        self.execute(f"CREATE SCHEMA [{schema}]")
+        self.execute(f"CREATE SCHEMA [{schema_name}]")
 
     def _create_table_from_columns(
         self,
