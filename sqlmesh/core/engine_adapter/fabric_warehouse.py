@@ -50,8 +50,9 @@ class FabricWarehouseAdapter(MSSQLEngineAdapter):
         if table.this and hasattr(table.this, "name") and not table.db:
             return table.this.name
 
-        # If we can't determine the schema, provide a more informative error
-        raise ValueError(f"Could not determine schema name from '{name}'. Parsed table: {table}")
+        # If no schema is specified, default to 'dbo' (SQL Server default schema)
+        # This handles cases like temporary table names without schema qualification
+        return "dbo"
 
     def create_schema(
         self,
@@ -154,12 +155,8 @@ class FabricWarehouseAdapter(MSSQLEngineAdapter):
         table = exp.to_table(name)
         # Ensure we always have a catalog (database) set
         catalog = table.catalog or exp.to_identifier(self.database)
-        # Ensure we have a schema (db) set - if not provided, try to extract it
-        schema = table.db
-        if not schema and table.this:
-            # If no schema provided and we have a table name, we might need a default schema
-            # For now, keep the original behavior but ensure catalog is set
-            pass
+        # Ensure we have a schema (db) set - if not provided, use default
+        schema = table.db or exp.to_identifier("dbo")
         return exp.Table(this=table.this, db=schema, catalog=catalog)
 
     def create_view(
