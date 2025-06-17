@@ -268,23 +268,41 @@ class FabricWarehouseAdapter(MSSQLEngineAdapter):
         """
         sql = super()._to_sql(expression, quote=quote, **kwargs)
 
+        import re
+
         # Fix the IF NOT EXISTS pattern to use database-qualified INFORMATION_SCHEMA
-        # Replace: information_schema.tables
-        # With: {database}.INFORMATION_SCHEMA.TABLES
-        if "information_schema.tables" in sql.lower():
-            # Case-insensitive replacement maintaining the original case pattern
-            import re
+        # Only replace if not already database-qualified to avoid double-qualification
 
-            pattern = r"\binformation_schema\.tables\b"
-            replacement = f"{self.database}.INFORMATION_SCHEMA.TABLES"
-            sql = re.sub(pattern, replacement, sql, flags=re.IGNORECASE)
+        # For information_schema.tables:
+        # Match: information_schema.tables (not preceded by a database name)
+        # Don't match: db.information_schema.tables or db.INFORMATION_SCHEMA.TABLES
+        if self.database and re.search(r"\binformation_schema\.tables\b", sql, flags=re.IGNORECASE):
+            # Check if it's already qualified (has database prefix)
+            escaped_db = re.escape(self.database)
+            if not re.search(
+                rf"\b{escaped_db}\.information_schema\.tables\b",
+                sql,
+                flags=re.IGNORECASE,
+            ):
+                # Replace unqualified references only
+                pattern = r"\binformation_schema\.tables\b"
+                replacement = f"{self.database}.INFORMATION_SCHEMA.TABLES"
+                sql = re.sub(pattern, replacement, sql, flags=re.IGNORECASE)
 
-        # Also fix references to information_schema.schemata if they exist
-        if "information_schema.schemata" in sql.lower():
-            import re
-
-            pattern = r"\binformation_schema\.schemata\b"
-            replacement = f"{self.database}.INFORMATION_SCHEMA.SCHEMATA"
-            sql = re.sub(pattern, replacement, sql, flags=re.IGNORECASE)
+        # Same for information_schema.schemata
+        if self.database and re.search(
+            r"\binformation_schema\.schemata\b", sql, flags=re.IGNORECASE
+        ):
+            # Check if it's already qualified (has database prefix)
+            escaped_db = re.escape(self.database)
+            if not re.search(
+                rf"\b{escaped_db}\.information_schema\.schemata\b",
+                sql,
+                flags=re.IGNORECASE,
+            ):
+                # Replace unqualified references only
+                pattern = r"\binformation_schema\.schemata\b"
+                replacement = f"{self.database}.INFORMATION_SCHEMA.SCHEMATA"
+                sql = re.sub(pattern, replacement, sql, flags=re.IGNORECASE)
 
         return sql
