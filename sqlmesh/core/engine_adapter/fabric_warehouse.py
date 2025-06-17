@@ -140,7 +140,7 @@ class FabricWarehouseAdapter(MSSQLEngineAdapter):
 
         sql = (
             exp.select("1")
-            .from_("INFORMATION_SCHEMA.TABLES")
+            .from_(f"{self.database}.INFORMATION_SCHEMA.TABLES")
             .where(f"TABLE_NAME = '{table.alias_or_name}'")
             .where(f"TABLE_SCHEMA = '{schema}'")
         )
