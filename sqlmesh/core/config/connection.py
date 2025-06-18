@@ -1595,7 +1595,7 @@ class FabricConnectionConfig(MSSQLConnectionConfig):
     It is recommended to use the 'pyodbc' driver for Fabric.
     """
 
-    type_: t.Literal["fabric"] = Field(alias="type", default="fabric")
+    type_: t.Literal["fabric"] = Field(alias="type", default="fabric")  # type: ignore
     autocommit: t.Optional[bool] = True
 
     @property
