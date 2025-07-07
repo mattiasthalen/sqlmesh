@@ -1,40 +1,46 @@
-import { isFalse, isNil, isStringEmptyOrNil, toID } from '@/utils/index'
+import { isFalse, isNil } from '@/utils/index'
 import { type Lineage } from '@/domain/lineage'
 import type { ModelEncodedFQN } from '@/domain/models'
+import {
+  toID,
+  type NodeId,
+  type LineageWorkerMessage,
+  type LineageWorkerRequestMessage,
+  type LineageWorkerResponseMessage,
+  type LineageWorkerErrorMessage,
+  type ConnectedNode,
+} from '@/components/graph/types'
+import type { Direction } from '../types'
 
-export interface ConnectedNode {
-  id?: string
-  edges: ConnectedNode[]
+interface WorkerScope {
+  onmessage: ((e: MessageEvent<LineageWorkerMessage>) => void) | null
+  postMessage: (message: LineageWorkerMessage) => void
 }
 
-const EnumDirection = {
-  Upstream: 'upstream',
-  Downstream: 'downstream',
-} as const
+const scope = self as unknown as WorkerScope
 
-type Direction = (typeof EnumDirection)[keyof typeof EnumDirection]
-
-const scope = self as any
-
-scope.onmessage = async (e: MessageEvent) => {
+scope.onmessage = async (e: MessageEvent<LineageWorkerMessage>) => {
   if (e.data.topic === 'lineage') {
     try {
-      const { currentLineage, newLineage, mainNode } = e.data.payload
+      const message = e.data as LineageWorkerRequestMessage
+      const { currentLineage, newLineage, mainNode } = message.payload
       const lineage = await mergeLineageWithModels(currentLineage, newLineage)
       const nodesConnections = await getNodesConnections(mainNode, lineage)
 
-      scope.postMessage({
+      const responseMessage: LineageWorkerResponseMessage = {
         topic: 'lineage',
         payload: {
           lineage,
           nodesConnections,
         },
-      })
+      }
+      scope.postMessage(responseMessage)
     } catch (error) {
-      scope.postMessage({
+      const errorMessage: LineageWorkerErrorMessage = {
         topic: 'error',
-        error,
-      })
+        error: error as Error,
+      }
+      scope.postMessage(errorMessage)
     }
   }
 }
@@ -68,8 +74,8 @@ async function getNodesConnections(
     const distances: Record<string, ConnectedNode> = {}
 
     try {
-      getConnectedNodes(EnumDirection.Upstream, mainNode, lineage, distances)
-      getConnectedNodes(EnumDirection.Downstream, mainNode, lineage, distances)
+      getConnectedNodes('upstream', mainNode, lineage, distances)
+      getConnectedNodes('downstream', mainNode, lineage, distances)
     } catch (error) {
       reject(error)
     }
@@ -79,12 +85,12 @@ async function getNodesConnections(
 }
 
 function getConnectedNodes(
-  direction: Direction = EnumDirection.Downstream,
+  direction: Direction = 'downstream',
   node: string,
   lineage: Record<string, Lineage> = {},
   result: Record<string, ConnectedNode> = {},
 ): void {
-  const isDownstream = direction === EnumDirection.Downstream
+  const isDownstream = direction === 'downstream'
   let models: string[] = []
 
   if (isDownstream) {
@@ -96,7 +102,7 @@ function getConnectedNodes(
   }
 
   if (isFalse(node in result)) {
-    result[node] = createConnectedNode()
+    result[node] = { edges: [] }
   }
 
   for (const model of models) {
@@ -114,14 +120,10 @@ function getConnectedNodes(
 }
 
 function createConnectedNode(
-  source?: string,
-  target?: string,
+  source: NodeId,
+  target: NodeId,
   edges: ConnectedNode[] = [],
 ): ConnectedNode {
   const id = toID(source, target)
-
-  return {
-    id: isStringEmptyOrNil(id) ? undefined : id,
-    edges,
-  }
+  return { id, edges }
 }

@@ -279,6 +279,8 @@ def render(
     **format_kwargs: t.Any,
 ) -> None:
     """Render a model's query, optionally expanding referenced models."""
+    model = ctx.obj.get_model(model, raise_if_missing=True)
+
     rendered = ctx.obj.render(
         model,
         start=start,
@@ -519,6 +521,11 @@ def diff(ctx: click.Context, environment: t.Optional[str] = None) -> None:
     is_flag=True,
     help="Explain the plan instead of applying it.",
     default=None,
+)
+@click.option(
+    "--min-intervals",
+    default=0,
+    help="For every model, ensure at least this many intervals are covered by a missing intervals check regardless of the plan start date",
 )
 @opt.verbose
 @click.pass_context

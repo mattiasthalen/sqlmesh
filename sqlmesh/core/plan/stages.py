@@ -361,11 +361,14 @@ class PlanStagesBuilder:
             # Otherwise, unpause right after updatig the environment record.
             stages.append(UnpauseStage(promoted_snapshots=promoted_snapshots))
 
+        full_demoted_snapshots = self.state_reader.get_snapshots(
+            s.snapshot_id for s in demoted_snapshots if s.snapshot_id not in snapshots
+        )
         virtual_layer_update_stage = self._get_virtual_layer_update_stage(
             promoted_snapshots,
             demoted_snapshots,
             demoted_environment_naming_info,
-            snapshots,
+            snapshots | full_demoted_snapshots,
             deployability_index,
         )
         if virtual_layer_update_stage:
@@ -524,7 +527,8 @@ class PlanStagesBuilder:
             },
             deployability_index=deployability_index,
             end_bounded=plan.end_bounded,
-            interval_end_per_model=plan.interval_end_per_model,
+            start_override_per_model=plan.start_override_per_model,
+            end_override_per_model=plan.end_override_per_model,
         )
 
     def _get_audit_only_snapshots(

@@ -2073,8 +2073,8 @@ class TerminalConsole(Console):
             if not plan_builder.override_end:
                 if plan.provided_end:
                     blank_meaning = f"'{time_like_to_str(plan.provided_end)}'"
-                elif plan.interval_end_per_model:
-                    max_end = max(plan.interval_end_per_model.values())
+                elif plan.end_override_per_model:
+                    max_end = max(plan.end_override_per_model.values())
                     blank_meaning = f"'{time_like_to_str(max_end)}'"
                 else:
                     blank_meaning = "now"
@@ -3107,7 +3107,9 @@ class MarkdownConsole(CaptureTerminalConsole):
     AUDIT_PADDING = 7
 
     def __init__(self, **kwargs: t.Any) -> None:
-        super().__init__(**{**kwargs, "console": RichConsole(no_color=True)})
+        super().__init__(
+            **{**kwargs, "console": RichConsole(no_color=True, width=kwargs.pop("width", None))}
+        )
 
     def show_environment_difference_summary(
         self,
@@ -3224,8 +3226,9 @@ class MarkdownConsole(CaptureTerminalConsole):
             )
         else:
             for snapshot_table_info in models:
+                category_str = SNAPSHOT_CHANGE_CATEGORY_STR[snapshot_table_info.change_category]
                 self._print(
-                    f"- `{snapshot_table_info.display_name(environment_naming_info, default_catalog if self.verbosity < Verbosity.VERY_VERBOSE else None, dialect=self.dialect)}`"
+                    f"- `{snapshot_table_info.display_name(environment_naming_info, default_catalog if self.verbosity < Verbosity.VERY_VERBOSE else None, dialect=self.dialect)}` ({category_str})"
                 )
 
     def _print_modified_models(
@@ -3237,7 +3240,7 @@ class MarkdownConsole(CaptureTerminalConsole):
         no_diff: bool = True,
     ) -> None:
         directly_modified = []
-        indirectly_modified = []
+        indirectly_modified: t.List[Snapshot] = []
         metadata_modified = []
         for snapshot in modified_snapshots:
             if context_diff.directly_modified(snapshot.name):
@@ -3249,11 +3252,40 @@ class MarkdownConsole(CaptureTerminalConsole):
         if directly_modified:
             self._print("\n**Directly Modified:**")
             for snapshot in sorted(directly_modified):
+                category_str = SNAPSHOT_CHANGE_CATEGORY_STR[snapshot.change_category]
                 self._print(
-                    f"- `{snapshot.display_name(environment_naming_info, default_catalog if self.verbosity < Verbosity.VERY_VERBOSE else None, dialect=self.dialect)}`"
+                    f"* `{snapshot.display_name(environment_naming_info, default_catalog if self.verbosity < Verbosity.VERY_VERBOSE else None, dialect=self.dialect)}` ({category_str})"
                 )
+
+                indirectly_modified_children = sorted(
+                    [s for s in indirectly_modified if snapshot.snapshot_id in s.parents]
+                )
+
                 if not no_diff:
-                    self._print(f"```diff\n{context_diff.text_diff(snapshot.name)}\n```")
+                    diff_text = context_diff.text_diff(snapshot.name)
+                    # sometimes there is no text_diff, like on a seed model where the data has been updated
+                    if diff_text:
+                        diff_text = f"\n```diff\n{diff_text}\n```"
+                        # these are part of a Markdown list, so indent them by 2 spaces to relate them to the current list item
+                        diff_text_indented = "\n".join(
+                            [f"  {line}" for line in diff_text.splitlines()]
+                        )
+                        self._print(diff_text_indented)
+                    else:
+                        if indirectly_modified_children:
+                            self._print("\n")
+
+                if indirectly_modified_children:
+                    self._print("  Indirectly Modified Children:")
+                    for child_snapshot in indirectly_modified_children:
+                        child_category_str = SNAPSHOT_CHANGE_CATEGORY_STR[
+                            child_snapshot.change_category
+                        ]
+                        self._print(
+                            f"    - `{child_snapshot.display_name(environment_naming_info, default_catalog if self.verbosity < Verbosity.VERY_VERBOSE else None, dialect=self.dialect)}` ({child_category_str})"
+                        )
+                    self._print("\n")
+
         if indirectly_modified:
             self._print("\n**Indirectly Modified:**")
             self._print_models_with_threshold(

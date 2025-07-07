@@ -16,11 +16,11 @@ import type { VSCodeEvent } from '@bus/callbacks'
 import { URI } from 'vscode-uri'
 import type { Model } from '@/api/client'
 import { useRpc } from '@/utils/rpc'
-import type {
-  ModelEncodedFQN,
-  ModelName,
-  ModelPath,
-  ModelFullPath,
+import {
+  type ModelPath,
+  type ModelFullPath,
+  type ModelName,
+  type ModelEncodedFQN,
 } from '@/domain/models'
 
 export function LineagePage() {
@@ -100,9 +100,12 @@ function Lineage() {
       // @ts-ignore
       const fileUri: string = activeFile.fileUri
       const filePath = URI.file(fileUri).path
-      const model = models.find(
-        (m: Model) => URI.file(m.full_path).path === filePath,
-      )
+      const model = models.find((m: Model) => {
+        if (!m.full_path) {
+          return false
+        }
+        return URI.file(m.full_path).path === filePath
+      })
       if (model) {
         return model.name
       }
@@ -194,6 +197,9 @@ export function LineageComponentFromWeb({
     const model = Object.values(models).find(m => m.fqn === decodedId)
     if (!model) {
       throw new Error('Model not found')
+    }
+    if (!model.full_path) {
+      return
     }
     vscode('openFile', { uri: URI.file(model.full_path).toString() })
   }
