@@ -10,6 +10,7 @@ from sqlmesh.core.engine_adapter.bigquery import BigQueryEngineAdapter
 from sqlmesh.core.engine_adapter.clickhouse import ClickhouseEngineAdapter
 from sqlmesh.core.engine_adapter.databricks import DatabricksEngineAdapter
 from sqlmesh.core.engine_adapter.duckdb import DuckDBEngineAdapter
+from sqlmesh.core.engine_adapter.fabric_spark import FabricSparkEngineAdapter
 from sqlmesh.core.engine_adapter.mssql import MSSQLEngineAdapter
 from sqlmesh.core.engine_adapter.mysql import MySQLEngineAdapter
 from sqlmesh.core.engine_adapter.postgres import PostgresEngineAdapter
@@ -28,6 +29,7 @@ DIALECT_TO_ENGINE_ADAPTER = {
     "duckdb": DuckDBEngineAdapter,
     "snowflake": SnowflakeEngineAdapter,
     "databricks": DatabricksEngineAdapter,
+    "fabric-spark": FabricSparkEngineAdapter,
     "redshift": RedshiftEngineAdapter,
     "postgres": PostgresEngineAdapter,
     "mysql": MySQLEngineAdapter,

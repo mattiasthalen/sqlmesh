@@ -982,6 +982,62 @@ class DatabricksConnectionConfig(ConnectionConfig):
         )
 
 
+class FabricSparkConnectionConfig(ConnectionConfig):
+    """
+    Microsoft Fabric Spark connection using Livy REST API.
+
+    Args:
+        workspace_id: The Fabric workspace ID.
+        lakehouse: The default lakehouse name to use for operations.
+        client_id: The Azure Active Directory application client ID.
+        client_secret: The Azure Active Directory application client secret.
+        tenant_id: The Azure Active Directory tenant ID.
+        concurrent_tasks: The maximum number of tasks that can use this connection concurrently.
+        register_comments: Whether or not to register model comments with the SQL engine.
+        pre_ping: Whether or not to pre-ping the connection before starting a new transaction to ensure it is still alive.
+    """
+
+    workspace_id: str
+    lakehouse: str
+    client_id: str
+    client_secret: str
+    tenant_id: str
+    concurrent_tasks: int = 1
+    register_comments: bool = True
+    pre_ping: t.Literal[False] = False
+    type_: t.Literal["fabric-spark"] = Field(alias="type", default="fabric-spark")
+
+    DIALECT: t.ClassVar[t.Literal["fabric-spark"]] = "fabric-spark"
+    DISPLAY_NAME: t.ClassVar[t.Literal["Microsoft Fabric Spark"]] = "Microsoft Fabric Spark"
+    DISPLAY_ORDER: t.ClassVar[t.Literal[15]] = 15
+
+    @property
+    def _connection_kwargs_keys(self) -> t.Set[str]:
+        return set()  # We don't use traditional DB connections
+
+    @property
+    def _engine_adapter(self) -> t.Type[engine_adapter.FabricSparkEngineAdapter]:
+        return engine_adapter.FabricSparkEngineAdapter
+
+    @property
+    def _extra_engine_config(self) -> t.Dict[str, t.Any]:
+        return {
+            "workspace_id": self.workspace_id,
+            "lakehouse": self.lakehouse,
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "tenant_id": self.tenant_id,
+        }
+
+    @property
+    def _connection_factory(self) -> t.Callable:
+        # Return a dummy connection factory since we use REST API
+        def fake_connection() -> None:
+            return None
+
+        return fake_connection
+
+
 class BigQueryConnectionMethod(str, Enum):
     OAUTH = "oauth"
     OAUTH_SECRETS = "oauth-secrets"

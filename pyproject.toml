@@ -51,6 +51,7 @@ bigquery = [
 bigframes = ["bigframes>=1.32.0"]
 clickhouse = ["clickhouse-connect"]
 databricks = ["databricks-sql-connector[pyarrow]"]
+fabric-spark = ["requests"]
 dev = [
     "agate==1.7.1",
     "beautifulsoup4",

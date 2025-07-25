@@ -164,6 +164,10 @@ databricks-test: guard-DATABRICKS_CATALOG guard-DATABRICKS_SERVER_HOSTNAME guard
 	pip install 'databricks-connect==${DATABRICKS_CONNECT_VERSION}'
 	pytest -n auto -m "databricks" --retries 3 --junitxml=test-results/junit-databricks.xml
 
+fabric-spark-test: guard-FABRIC_WORKSPACE_ID guard-FABRIC_LAKEHOUSE guard-FABRIC_CLIENT_ID guard-FABRIC_CLIENT_SECRET guard-FABRIC_TENANT_ID engine-fabric-spark-install
+	pip install -e ".[fabric-spark]"
+	pytest -n auto -m "fabric_spark" --retries 3 --junitxml=test-results/junit-fabric-spark.xml
+
 redshift-test: guard-REDSHIFT_HOST guard-REDSHIFT_USER guard-REDSHIFT_PASSWORD guard-REDSHIFT_DATABASE engine-redshift-install
 	pytest -n auto -m "redshift" --retries 3 --junitxml=test-results/junit-redshift.xml
 
