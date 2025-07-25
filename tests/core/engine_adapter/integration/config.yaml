@@ -194,7 +194,6 @@ gateways:
       client_id: {{ env_var('FABRIC_CLIENT_ID') }}
       client_secret: {{ env_var('FABRIC_CLIENT_SECRET') }}
       tenant_id: {{ env_var('FABRIC_TENANT_ID') }}
-      check_import: false
     state_connection:
       type: duckdb
 
