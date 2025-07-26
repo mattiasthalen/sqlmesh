@@ -57,8 +57,10 @@ def test_endpoint_urls(fabric_adapter):
     expected_fabric_endpoint = "https://api.fabric.microsoft.com/v1/workspaces/test-workspace-id"
     assert fabric_adapter.fabric_endpoint == expected_fabric_endpoint
 
-    expected_livy_endpoint = f"{expected_fabric_endpoint}/lakehouses/test-lakehouse-id/sparkJobs"
-    assert fabric_adapter.livy_endpoint == expected_livy_endpoint
+    expected_livy_endpoint = (
+        f"{expected_fabric_endpoint}/lakehouses/test-lakehouse-id/livyapi/versions/2023-12-01"
+    )
+    assert fabric_adapter._get_livy_endpoint() == expected_livy_endpoint
 
 
 def test_cursor_property(fabric_adapter):

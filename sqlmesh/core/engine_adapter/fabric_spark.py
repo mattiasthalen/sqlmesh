@@ -56,9 +56,10 @@ class FabricSparkEngineAdapter(EngineAdapter):
 
     def __init__(self, connection_factory: t.Callable[[], t.Any], **kwargs: t.Any) -> None:
         super().__init__(connection_factory, **kwargs)
-        self._livy_session_id: t.Optional[int] = None
+        self._livy_session_id: t.Optional[t.Union[int, str]] = None
         self._session_headers: t.Dict[str, str] = {}
         self._fabric_headers: t.Dict[str, str] = {}
+        self._lakehouse_id_cache: t.Optional[str] = None
         self._setup_authentication()
 
     def _setup_authentication(self) -> None:
@@ -113,10 +114,9 @@ class FabricSparkEngineAdapter(EngineAdapter):
             raise SQLMeshError("workspace_id is required for Fabric Spark connection")
         return workspace_id
 
-    @property
-    def livy_endpoint(self) -> str:
+    def _get_livy_endpoint(self) -> str:
         """Get Livy endpoint URL."""
-        return f"https://api.fabric.microsoft.com/v1/workspaces/{self.workspace_id}/lakehouses/{self.default_lakehouse_id}/versions/2023-12-01/sessions"
+        return f"https://api.fabric.microsoft.com/v1/workspaces/{self.workspace_id}/lakehouses/{self.default_lakehouse_id}/livyapi/versions/2023-12-01"
 
     @property
     def fabric_endpoint(self) -> str:
@@ -134,20 +134,26 @@ class FabricSparkEngineAdapter(EngineAdapter):
     @property
     def default_lakehouse_id(self) -> str:
         """Get default lakehouse ID by looking up the name."""
-        lakehouse_id = self._get_lakehouse_id(self.default_lakehouse_name)
-        if not lakehouse_id:
-            raise SQLMeshError(f"Lakehouse '{self.default_lakehouse_name}' not found")
-        return lakehouse_id
+        if self._lakehouse_id_cache is None:
+            lakehouse_id = self._get_lakehouse_id(self.default_lakehouse_name)
+            if not lakehouse_id:
+                raise SQLMeshError(f"Lakehouse '{self.default_lakehouse_name}' not found")
+            self._lakehouse_id_cache = lakehouse_id
+        return self._lakehouse_id_cache
 
     @property
     def catalog_support(self) -> CatalogSupport:
         return CatalogSupport.FULL_SUPPORT
 
+    def get_current_catalog(self) -> t.Optional[str]:
+        """Return the current catalog (lakehouse) name."""
+        return self.default_lakehouse_name
+
     @property
     def _use_spark_session(self) -> bool:
         return False  # We use Livy REST API instead
 
-    def _create_livy_session(self) -> int:
+    def _create_livy_session(self) -> t.Union[int, str]:
         """Create a new Livy session and return the session ID."""
         if self._livy_session_id is not None:
             return self._livy_session_id
@@ -162,17 +168,21 @@ class FabricSparkEngineAdapter(EngineAdapter):
         }
 
         response = requests.post(
-            f"{self.livy_endpoint}/sessions",
+            f"{self._get_livy_endpoint()}/sessions",
             headers=self._session_headers,
             json=session_config,
             timeout=60,
         )
 
-        if response.status_code != 201:
+        if response.status_code not in (200, 201):
             raise SQLMeshError(f"Failed to create Livy session: {response.text}")
 
         session_data = response.json()
-        session_id = session_data["id"]
+        # Handle different response formats from Fabric API
+        if "id" in session_data:
+            session_id = session_data["id"]
+        else:
+            raise SQLMeshError(f"Unexpected session response format: {response.text}")
 
         # Wait for session to be ready
         self._wait_for_session_ready(session_id)
@@ -180,12 +190,30 @@ class FabricSparkEngineAdapter(EngineAdapter):
         self._livy_session_id = session_id
         return session_id
 
-    def _wait_for_session_ready(self, session_id: int, timeout: int = 300) -> None:
+    def _wait_for_async_operation(self, location_url: str, timeout: int = 300) -> None:
+        """Wait for an async Fabric operation to complete by polling the location URL."""
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            response = requests.get(location_url, headers=self._fabric_headers, timeout=30)
+
+            if response.status_code == 200:
+                # Operation completed successfully
+                return
+            if response.status_code == 202:
+                # Still in progress, continue polling
+                time.sleep(5)
+                continue
+            else:
+                raise SQLMeshError(f"Async operation failed: {response.text}")
+
+        raise SQLMeshError(f"Async operation did not complete within {timeout} seconds")
+
+    def _wait_for_session_ready(self, session_id: t.Union[int, str], timeout: int = 300) -> None:
         """Wait for Livy session to be in 'idle' state."""
         start_time = time.time()
         while time.time() - start_time < timeout:
             response = requests.get(
-                f"{self.livy_endpoint}/sessions/{session_id}",
+                f"{self._get_livy_endpoint()}/sessions/{session_id}",
                 headers=self._session_headers,
                 timeout=30,
             )
@@ -212,7 +240,7 @@ class FabricSparkEngineAdapter(EngineAdapter):
         statement_config = {"code": sql, "kind": "sql"}
 
         response = requests.post(
-            f"{self.livy_endpoint}/sessions/{session_id}/statements",
+            f"{self._get_livy_endpoint()}/sessions/{session_id}/statements",
             headers=self._session_headers,
             json=statement_config,
             timeout=60,
@@ -228,13 +256,13 @@ class FabricSparkEngineAdapter(EngineAdapter):
         return self._wait_for_statement_completion(session_id, statement_id)
 
     def _wait_for_statement_completion(
-        self, session_id: int, statement_id: int, timeout: int = 600
+        self, session_id: t.Union[int, str], statement_id: t.Union[int, str], timeout: int = 600
     ) -> t.Dict[str, t.Any]:
         """Wait for Livy statement to complete and return the result."""
         start_time = time.time()
         while time.time() - start_time < timeout:
             response = requests.get(
-                f"{self.livy_endpoint}/sessions/{session_id}/statements/{statement_id}",
+                f"{self._get_livy_endpoint()}/sessions/{session_id}/statements/{statement_id}",
                 headers=self._session_headers,
                 timeout=30,
             )
@@ -398,6 +426,17 @@ class FabricSparkEngineAdapter(EngineAdapter):
             timeout=60,
         )
 
+        if response.status_code == 202:
+            # Handle async lakehouse creation - poll the location header for completion
+            location = response.headers.get("Location")
+            if not location:
+                raise SQLMeshError(
+                    "Received 202 but no Location header for polling lakehouse creation"
+                )
+
+            # Wait for lakehouse creation to complete
+            self._wait_for_async_operation(location)
+            return
         if response.status_code not in (200, 201):
             if "already exists" in response.text.lower():
                 return
@@ -528,7 +567,7 @@ class FabricSparkEngineAdapter(EngineAdapter):
         if self._livy_session_id is not None:
             try:
                 requests.delete(
-                    f"{self.livy_endpoint}/sessions/{self._livy_session_id}",
+                    f"{self._get_livy_endpoint()}/sessions/{self._livy_session_id}",
                     headers=self._session_headers,
                     timeout=30,
                 )
