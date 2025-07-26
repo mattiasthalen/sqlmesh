@@ -23,7 +23,8 @@ from sqlmesh.utils.errors import SQLMeshError
 if t.TYPE_CHECKING:
     import pandas as pd
 
-    from sqlmesh.core._typing import SchemaName, SessionProperties
+    from sqlmesh.core._typing import SchemaName, SessionProperties, TableName
+    from sqlmesh.core.engine_adapter._typing import QueryOrDF
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class FabricSparkEngineAdapter(EngineAdapter):
     """
 
     # TODO: Add support for specifying fabric environment: https://learn.microsoft.com/en-us/fabric/data-engineering/get-started-api-livy
+    # TODO: Add creation of lakehouse if it doesn't exist in the workspace
 
     DIALECT = "spark"  # Use Spark dialect since fabric-spark isn't available in SQLGlot
     INSERT_OVERWRITE_STRATEGY = InsertOverwriteStrategy.INSERT_OVERWRITE
@@ -67,6 +69,10 @@ class FabricSparkEngineAdapter(EngineAdapter):
         self._session_headers: t.Dict[str, str] = {}
         self._fabric_headers: t.Dict[str, str] = {}
         self._lakehouse_id_cache: t.Optional[str] = None
+
+        # Set default catalog to the lakehouse name for single catalog support
+        self._default_catalog = self._default_catalog or self.default_lakehouse_name
+
         self._setup_authentication()
 
     def _setup_authentication(self) -> None:
@@ -529,6 +535,12 @@ class FabricSparkEngineAdapter(EngineAdapter):
         else:
             sql = str(expressions)
 
+        # Check for empty SQL and skip execution if empty
+        sql = sql.strip()
+        if not sql:
+            logger.debug("Skipping execution of empty SQL statement")
+            return
+
         logger.debug(f"Executing SQL: {sql}")
         result = self._execute_livy_statement(sql)
 
@@ -704,6 +716,79 @@ class FabricSparkEngineAdapter(EngineAdapter):
         drop_schema_sql = f"DROP SCHEMA {'IF EXISTS ' if ignore_if_not_exists else ''}{schema.db} {'CASCADE' if cascade else 'RESTRICT'}"
         self.execute(drop_schema_sql)
 
+    def create_view(
+        self,
+        view_name: TableName,
+        query_or_df: QueryOrDF,
+        columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
+        replace: bool = True,
+        materialized: bool = False,
+        materialized_properties: t.Optional[t.Dict[str, t.Any]] = None,
+        table_description: t.Optional[str] = None,
+        column_descriptions: t.Optional[t.Dict[str, str]] = None,
+        view_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
+        **create_kwargs: t.Any,
+    ) -> None:
+        """
+        Create a view as a materialized lake view in Microsoft Fabric.
+
+        Microsoft Fabric lakehouse schemas do not support regular views - only tables are supported.
+        See: https://learn.microsoft.com/en-us/fabric/data-engineering/lakehouse-schemas#public-preview-limitations
+
+        For SQLMesh virtual environments, we create materialized lake views which provide:
+        - Similar semantics to views (query-based definition)
+        - Automatic refresh capabilities
+        - Better performance than regular tables for analytical workloads
+
+        Note: To update a materialized lake view definition, it must be dropped and recreated
+        as ALTER statements are only supported for renaming.
+        """
+        schema = exp.to_table(view_name)
+
+        source_queries, columns_to_types = self._get_source_queries_and_columns_to_types(
+            query_or_df, columns_to_types, batch_size=0, target_table=view_name
+        )
+
+        if len(source_queries) != 1:
+            raise SQLMeshError("Only one source query is supported for creating views")
+
+        with source_queries[0] as query:
+            # Create as materialized lake view
+            # Note: Replace is handled by DROP + CREATE (no IF EXISTS for materialized lake views)
+            if replace:
+                drop_sql = (
+                    f"DROP MATERIALIZED LAKE VIEW IF EXISTS {schema.sql(dialect=self.dialect)}"
+                )
+                try:
+                    self.execute(drop_sql)
+                except Exception as e:
+                    # If DROP fails because view doesn't exist, continue
+                    logger.debug(f"Failed to drop materialized lake view (may not exist): {e}")
+
+            # Build materialized lake view clauses
+            clauses = []
+
+            # Add comment clause if provided
+            if table_description:
+                clauses.append(f'COMMENT "{table_description}"')
+
+            # Build TBLPROPERTIES clause
+            properties = []
+            if materialized_properties:
+                for key, value in materialized_properties.items():
+                    properties.append(f'"{key}"="{value}"')
+
+            if properties:
+                clauses.append(f"TBLPROPERTIES ({', '.join(properties)})")
+
+            # Build the CREATE MATERIALIZED LAKE VIEW statement
+            clauses_str = " ".join(clauses)
+            create_sql = f"""CREATE MATERIALIZED LAKE VIEW IF NOT EXISTS {schema.sql(dialect=self.dialect)}
+{clauses_str}
+AS {query.sql(dialect=self.dialect)}"""
+
+            self.execute(create_sql)
+
     def _lakehouse_exists(self, lakehouse_name: str) -> bool:
         """Check if a lakehouse exists."""
         return self._get_lakehouse_id(lakehouse_name) is not None
@@ -778,38 +863,65 @@ class FabricSparkEngineAdapter(EngineAdapter):
             )
 
         schema_db = schema.db or "default"
-        show_tables_sql = f"SHOW TABLES IN {schema_db}"
+        objects = []
 
-        if object_names:
-            # Filter by specific table names if provided
-            names_filter = "', '".join(object_names)
-            show_tables_sql += f" LIKE '{names_filter}'"
+        # Get tables and materialized lake views separately
+        for object_type, show_sql in [
+            (DataObjectType.TABLE, f"SHOW TABLES IN {schema_db}"),
+            (DataObjectType.MATERIALIZED_VIEW, f"SHOW MATERIALIZED LAKE VIEWS IN {schema_db}"),
+        ]:
+            try:
+                result = self._execute_livy_statement(show_sql)
+                output = result.get("output", {})
+                data = output.get("data", {})
 
-        try:
-            result = self._execute_livy_statement(show_tables_sql)
-            output = result.get("output", {})
-            data = output.get("data", {})
+                # Handle Fabric's application/json format (preferred)
+                if "application/json" in data:
+                    json_data = data["application/json"]
+                    rows = json_data.get("data", [])
+                    if rows:
+                        for row in rows:
+                            if isinstance(row, list) and len(row) >= 2:
+                                object_name = row[1]  # Object name is typically in second column
+                                # Filter by specific names if provided
+                                if object_names is None or object_name in object_names:
+                                    objects.append(
+                                        DataObject(
+                                            catalog=self.default_lakehouse_name,
+                                            schema=schema_db,
+                                            name=object_name,
+                                            type=object_type,
+                                        )
+                                    )
 
-            objects = []
-            if "text/plain" in data:
-                text_data = data["text/plain"]
-                if isinstance(text_data, list):
-                    for row in text_data:
-                        if isinstance(row, list) and len(row) >= 2:
-                            table_name = row[1]  # Table name is typically in second column
-                            objects.append(
-                                DataObject(
-                                    catalog=self.default_lakehouse_name,
-                                    schema=schema_db,
-                                    name=table_name,
-                                    type=DataObjectType.TABLE,  # Fabric lakehouses primarily contain tables
-                                )
-                            )
+                # Fallback to text/plain format for compatibility
+                elif "text/plain" in data:
+                    text_data = data["text/plain"]
+                    if isinstance(text_data, list):
+                        for row in text_data:
+                            if isinstance(row, list) and len(row) >= 2:
+                                object_name = row[1]  # Object name is typically in second column
+                                # Filter by specific names if provided
+                                if object_names is None or object_name in object_names:
+                                    objects.append(
+                                        DataObject(
+                                            catalog=self.default_lakehouse_name,
+                                            schema=schema_db,
+                                            name=object_name,
+                                            type=object_type,
+                                        )
+                                    )
 
-            return objects
-        except Exception as e:
-            logger.warning(f"Failed to list tables in schema '{schema_name}': {e}")
-            return []
+            except Exception as e:
+                # SHOW MATERIALIZED LAKE VIEWS might not be supported in all Spark versions
+                if object_type == DataObjectType.MATERIALIZED_VIEW:
+                    logger.debug(
+                        f"Failed to list materialized lake views in schema '{schema_name}': {e}"
+                    )
+                else:
+                    logger.warning(f"Failed to list tables in schema '{schema_name}': {e}")
+
+        return objects
 
     def close(self) -> None:
         """Close the Livy session and release resources."""
