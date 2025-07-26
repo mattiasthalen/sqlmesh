@@ -15,6 +15,7 @@ from sqlmesh.core.engine_adapter.shared import (
     DataObject,
     DataObjectType,
     InsertOverwriteStrategy,
+    SourceQuery,
 )
 from sqlmesh.core.engine_adapter.base import EngineAdapter
 from sqlmesh.core.schema_diff import SchemaDiffer
@@ -734,11 +735,11 @@ class FabricSparkEngineAdapter(EngineAdapter):
 
         Microsoft Fabric lakehouse schemas do not support regular views - only tables are supported.
         See: https://learn.microsoft.com/en-us/fabric/data-engineering/lakehouse-schemas#public-preview-limitations
+        TODO: Revisit this when regular views are supported in Fabric lakehouses.
 
-        For SQLMesh virtual environments, we create materialized lake views which provide:
-        - Similar semantics to views (query-based definition)
-        - Automatic refresh capabilities
-        - Better performance than regular tables for analytical workloads
+        For SQLMesh compatibility:
+        - When materialized=False: Create materialized lake view but track it as a regular view for metadata
+        - When materialized=True: Create materialized lake view and track it as a materialized view
 
         Note: To update a materialized lake view definition, it must be dropped and recreated
         as ALTER statements are only supported for renaming.
@@ -772,11 +773,18 @@ class FabricSparkEngineAdapter(EngineAdapter):
             if table_description:
                 clauses.append(f'COMMENT "{table_description}"')
 
-            # Build TBLPROPERTIES clause
+            # Build TBLPROPERTIES clause - include our metadata tracking
             properties = []
             if materialized_properties:
                 for key, value in materialized_properties.items():
                     properties.append(f'"{key}"="{value}"')
+
+            # Add a property to track whether this should be considered a regular view
+            # This helps us classify it correctly in metadata queries
+            if not materialized:
+                properties.append('"sqlmesh.view_type"="VIEW"')
+            else:
+                properties.append('"sqlmesh.view_type"="MATERIALIZED_VIEW"')
 
             if properties:
                 clauses.append(f"TBLPROPERTIES ({', '.join(properties)})")
@@ -852,6 +860,9 @@ AS {query.sql(dialect=self.dialect)}"""
     ) -> t.List[DataObject]:
         """
         Returns all the data objects that exist in the given schema.
+
+        In Microsoft Fabric, we use table properties to distinguish between regular views
+        and materialized views, since both are implemented as materialized lake views.
         """
         schema = to_schema(schema_name)
 
@@ -865,42 +876,112 @@ AS {query.sql(dialect=self.dialect)}"""
         schema_db = schema.db or "default"
         objects = []
 
-        # Get tables and materialized lake views separately
-        for object_type, show_sql in [
-            (DataObjectType.TABLE, f"SHOW TABLES IN {schema_db}"),
-            (DataObjectType.MATERIALIZED_VIEW, f"SHOW MATERIALIZED LAKE VIEWS IN {schema_db}"),
-        ]:
+        # Get all materialized lake views first
+        materialized_views = []
+        try:
+            result = self._execute_livy_statement(f"SHOW MATERIALIZED LAKE VIEWS IN {schema_db}")
+            output = result.get("output", {})
+            data = output.get("data", {})
+
+            # Handle Fabric's application/json format (preferred)
+            if "application/json" in data:
+                json_data = data["application/json"]
+                rows = json_data.get("data", [])
+                if rows:
+                    for row in rows:
+                        if isinstance(row, list) and len(row) >= 2:
+                            object_name = row[1]  # Object name is typically in second column
+                            if object_names is None or object_name in object_names:
+                                materialized_views.append(object_name)
+
+            # Fallback to text/plain format for compatibility
+            elif "text/plain" in data:
+                text_data = data["text/plain"]
+                if isinstance(text_data, list):
+                    for row in text_data:
+                        if isinstance(row, list) and len(row) >= 2:
+                            object_name = row[1]  # Object name is typically in second column
+                            if object_names is None or object_name in object_names:
+                                materialized_views.append(object_name)
+
+        except Exception as e:
+            logger.debug(f"Failed to list materialized lake views in schema '{schema_name}': {e}")
+
+        # For each materialized view, check its properties to determine classification
+        for view_name in materialized_views:
             try:
-                result = self._execute_livy_statement(show_sql)
+                # Get table properties to determine the view type
+                table_info_sql = f"DESCRIBE TABLE EXTENDED {schema_db}.{view_name}"
+                result = self._execute_livy_statement(table_info_sql)
                 output = result.get("output", {})
                 data = output.get("data", {})
 
-                # Handle Fabric's application/json format (preferred)
+                # Default to MATERIALIZED_VIEW
+                view_type = DataObjectType.MATERIALIZED_VIEW
+
+                # Look for our custom property in the table properties
                 if "application/json" in data:
                     json_data = data["application/json"]
                     rows = json_data.get("data", [])
-                    if rows:
-                        for row in rows:
-                            if isinstance(row, list) and len(row) >= 2:
-                                object_name = row[1]  # Object name is typically in second column
-                                # Filter by specific names if provided
-                                if object_names is None or object_name in object_names:
-                                    objects.append(
-                                        DataObject(
-                                            catalog=self.default_lakehouse_name,
-                                            schema=schema_db,
-                                            name=object_name,
-                                            type=object_type,
-                                        )
-                                    )
-
-                # Fallback to text/plain format for compatibility
+                    for row in rows:
+                        if isinstance(row, list) and len(row) >= 2:
+                            # Look for table properties section
+                            if "Table Properties" in str(row[0]) and "sqlmesh.view_type" in str(
+                                row[1]
+                            ):
+                                if "VIEW" in str(row[1]):
+                                    view_type = DataObjectType.VIEW
+                                break
                 elif "text/plain" in data:
                     text_data = data["text/plain"]
                     if isinstance(text_data, list):
                         for row in text_data:
                             if isinstance(row, list) and len(row) >= 2:
-                                object_name = row[1]  # Object name is typically in second column
+                                # Look for table properties section
+                                if "Table Properties" in str(row[0]) and "sqlmesh.view_type" in str(
+                                    row[1]
+                                ):
+                                    if "VIEW" in str(row[1]):
+                                        view_type = DataObjectType.VIEW
+                                    break
+
+                objects.append(
+                    DataObject(
+                        catalog=self.default_lakehouse_name,
+                        schema=schema_db,
+                        name=view_name,
+                        type=view_type,
+                    )
+                )
+
+            except Exception as e:
+                # If we can't determine the type, default to materialized view
+                logger.debug(f"Failed to get properties for view {view_name}: {e}")
+                objects.append(
+                    DataObject(
+                        catalog=self.default_lakehouse_name,
+                        schema=schema_db,
+                        name=view_name,
+                        type=DataObjectType.MATERIALIZED_VIEW,
+                    )
+                )
+
+        # Get regular tables (exclude materialized views)
+        try:
+            result = self._execute_livy_statement(f"SHOW TABLES IN {schema_db}")
+            output = result.get("output", {})
+            data = output.get("data", {})
+
+            # Handle Fabric's application/json format (preferred)
+            if "application/json" in data:
+                json_data = data["application/json"]
+                rows = json_data.get("data", [])
+                if rows:
+                    for row in rows:
+                        if isinstance(row, list) and len(row) >= 2:
+                            object_name = row[1]  # Object name is typically in second column
+                            # Skip if this is already identified as a materialized view
+                            if object_name not in materialized_views:
                                 # Filter by specific names if provided
                                 if object_names is None or object_name in object_names:
                                     objects.append(
@@ -908,20 +989,83 @@ AS {query.sql(dialect=self.dialect)}"""
                                             catalog=self.default_lakehouse_name,
                                             schema=schema_db,
                                             name=object_name,
-                                            type=object_type,
+                                            type=DataObjectType.TABLE,
                                         )
                                     )
 
-            except Exception as e:
-                # SHOW MATERIALIZED LAKE VIEWS might not be supported in all Spark versions
-                if object_type == DataObjectType.MATERIALIZED_VIEW:
-                    logger.debug(
-                        f"Failed to list materialized lake views in schema '{schema_name}': {e}"
-                    )
-                else:
-                    logger.warning(f"Failed to list tables in schema '{schema_name}': {e}")
+            # Fallback to text/plain format for compatibility
+            elif "text/plain" in data:
+                text_data = data["text/plain"]
+                if isinstance(text_data, list):
+                    for row in text_data:
+                        if isinstance(row, list) and len(row) >= 2:
+                            object_name = row[1]  # Object name is typically in second column
+                            # Skip if this is already identified as a materialized view
+                            if object_name not in materialized_views:
+                                # Filter by specific names if provided
+                                if object_names is None or object_name in object_names:
+                                    objects.append(
+                                        DataObject(
+                                            catalog=self.default_lakehouse_name,
+                                            schema=schema_db,
+                                            name=object_name,
+                                            type=DataObjectType.TABLE,
+                                        )
+                                    )
+
+        except Exception as e:
+            logger.warning(f"Failed to list tables in schema '{schema_name}': {e}")
 
         return objects
+
+    def _create_table_from_source_queries(
+        self,
+        table_name: TableName,
+        source_queries: t.List[SourceQuery],
+        columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
+        exists: bool = True,
+        replace: bool = False,
+        table_description: t.Optional[str] = None,
+        column_descriptions: t.Optional[t.Dict[str, str]] = None,
+        table_kind: t.Optional[str] = None,
+        **kwargs: t.Any,
+    ) -> None:
+        """
+        Override CTAS to handle Fabric limitation that schemas cannot be specified in CTAS.
+
+        Microsoft Fabric Spark doesn't allow schema-qualified table names in CTAS statements.
+        We work around this by creating an unqualified CTAS in the correct schema context.
+        """
+        table = exp.to_table(table_name)
+
+        # Extract schema and table name components
+        schema_name = table.db if table.db else "default"
+        unqualified_table_name = table.name
+
+        # Switch to the target schema first
+        if schema_name != "default":
+            self.execute(f"USE SCHEMA {schema_name}")
+
+        try:
+            # Create table expression for the unqualified table name
+            unqualified_table = exp.Table(this=exp.to_identifier(unqualified_table_name))
+
+            # Call the base implementation but with only the table name (no schema qualification)
+            super()._create_table_from_source_queries(
+                unqualified_table,
+                source_queries,
+                columns_to_types=columns_to_types,
+                exists=exists,
+                replace=replace,
+                table_description=table_description,
+                column_descriptions=column_descriptions,
+                table_kind=table_kind,
+                **kwargs,
+            )
+        finally:
+            # Switch back to default schema to avoid affecting other operations
+            if schema_name != "default":
+                self.execute("USE SCHEMA default")
 
     def close(self) -> None:
         """Close the Livy session and release resources."""
