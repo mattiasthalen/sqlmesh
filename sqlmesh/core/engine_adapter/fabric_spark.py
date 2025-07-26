@@ -554,6 +554,15 @@ class FabricSparkEngineAdapter(EngineAdapter):
         output = self._last_result.get("output", {})
         data = output.get("data", {})
 
+        # Handle Fabric's application/json format (preferred)
+        if "application/json" in data:
+            json_data = data["application/json"]
+            rows = json_data.get("data", [])
+            if rows and len(rows) > 0:
+                # Return first row as tuple
+                return tuple(rows[0])
+
+        # Fallback to text/plain format for compatibility
         if "text/plain" in data:
             # Parse text output - this is a simplified implementation
             text_data = data["text/plain"]
@@ -582,6 +591,15 @@ class FabricSparkEngineAdapter(EngineAdapter):
         output = self._last_result.get("output", {})
         data = output.get("data", {})
 
+        # Handle Fabric's application/json format (preferred)
+        if "application/json" in data:
+            json_data = data["application/json"]
+            rows = json_data.get("data", [])
+            if rows:
+                # Return all rows as tuples
+                return [tuple(row) for row in rows]
+
+        # Fallback to text/plain format for compatibility
         if "text/plain" in data:
             # Parse text output - this is a simplified implementation
             text_data = data["text/plain"]
@@ -605,11 +623,22 @@ class FabricSparkEngineAdapter(EngineAdapter):
         output = result.get("output", {})
         data = output.get("data", {})
 
-        # This is a simplified implementation - in practice, you'd need to parse
-        # the Livy output format more carefully
+        # Handle Fabric's application/json format (preferred)
         if "application/json" in data:
             json_data = data["application/json"]
-            return pd.DataFrame(json_data)
+            rows = json_data.get("data", [])
+            schema = json_data.get("schema", {})
+
+            if rows and schema:
+                # Extract column names from schema
+                fields = schema.get("fields", [])
+                columns = [field.get("name", f"col_{i}") for i, field in enumerate(fields)]
+                return pd.DataFrame(rows, columns=columns)
+            if rows:
+                # Use rows without column names
+                return pd.DataFrame(rows)
+
+        # Fallback to text/plain format for compatibility
         if "text/plain" in data:
             text_data = data["text/plain"]
             if isinstance(text_data, list) and text_data:
