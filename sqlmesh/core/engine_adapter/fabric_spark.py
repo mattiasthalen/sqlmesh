@@ -38,6 +38,8 @@ class FabricSparkEngineAdapter(EngineAdapter):
     - Full catalog support for Fabric lakehouses
     """
 
+    # TODO: Add support for specifying fabric environment: https://learn.microsoft.com/en-us/fabric/data-engineering/get-started-api-livy
+
     DIALECT = "spark"  # Use Spark dialect since fabric-spark isn't available in SQLGlot
     INSERT_OVERWRITE_STRATEGY = InsertOverwriteStrategy.INSERT_OVERWRITE
     SUPPORTS_TRANSACTIONS = False
