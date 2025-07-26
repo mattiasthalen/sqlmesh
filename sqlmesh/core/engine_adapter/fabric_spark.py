@@ -45,6 +45,10 @@ class FabricSparkEngineAdapter(EngineAdapter):
     SUPPORTS_MATERIALIZED_VIEWS = True
     SUPPORTS_MATERIALIZED_VIEW_SCHEMA = True
 
+    # Class-level session pool shared across all adapter instances
+    # Format: {lakehouse_id: session_id}
+    _shared_session_pool: t.Dict[str, t.Union[int, str]] = {}
+
     SCHEMA_DIFFER = SchemaDiffer(
         support_positional_add=True,
         support_nested_operations=True,
@@ -156,17 +160,33 @@ class FabricSparkEngineAdapter(EngineAdapter):
 
     def _create_livy_session(self) -> t.Union[int, str]:
         """Create a new Livy session and return the session ID."""
+        lakehouse_id = self.default_lakehouse_id
+
+        # Check instance-level session first
         if self._livy_session_id is not None:
-            # Check if the existing session is still active
             if self._check_session_status(self._livy_session_id):
                 return self._livy_session_id
             # Session is no longer active, clear it
             self._livy_session_id = None
 
-        # Try to reuse an existing idle session before creating a new one
+        # Check shared session pool
+        shared_session_id = self._shared_session_pool.get(lakehouse_id)
+        if shared_session_id is not None:
+            if self._check_session_status(shared_session_id):
+                logger.info(
+                    f"Reusing shared session {shared_session_id} for lakehouse {lakehouse_id}"
+                )
+                self._livy_session_id = shared_session_id
+                return shared_session_id
+            # Session is no longer active, remove from shared pool
+            self._shared_session_pool.pop(lakehouse_id, None)
+
+        # Try to discover existing idle sessions
         reusable_session_id = self._find_idle_session()
         if reusable_session_id:
+            logger.info(f"Discovered reusable session {reusable_session_id}")
             self._livy_session_id = reusable_session_id
+            self._shared_session_pool[lakehouse_id] = reusable_session_id
             return reusable_session_id
 
         session_config = {
@@ -239,7 +259,10 @@ class FabricSparkEngineAdapter(EngineAdapter):
         # Wait for session to be ready
         self._wait_for_session_ready(session_id)
 
+        # Store in both instance and shared pool
         self._livy_session_id = session_id
+        self._shared_session_pool[lakehouse_id] = session_id
+        logger.info(f"Created and stored new session {session_id} for lakehouse {lakehouse_id}")
         return session_id
 
     def _wait_for_async_operation(self, location_url: str, timeout: int = 300) -> None:
@@ -373,9 +396,19 @@ class FabricSparkEngineAdapter(EngineAdapter):
 
     def _is_session_active(self) -> bool:
         """Indicates whether or not a session is active."""
-        return self._livy_session_id is not None and self._check_session_status(
-            self._livy_session_id
-        )
+        # Check instance session first
+        if self._livy_session_id is not None and self._check_session_status(self._livy_session_id):
+            return True
+
+        # Check shared session pool
+        lakehouse_id = self.default_lakehouse_id
+        shared_session_id = self._shared_session_pool.get(lakehouse_id)
+        if shared_session_id is not None and self._check_session_status(shared_session_id):
+            # Update instance to use the shared session
+            self._livy_session_id = shared_session_id
+            return True
+
+        return False
 
     def _execute_livy_statement(self, sql: str) -> t.Dict[str, t.Any]:
         """Execute a SQL statement through Livy and return the result."""
@@ -393,6 +426,15 @@ class FabricSparkEngineAdapter(EngineAdapter):
                     json=statement_config,
                     timeout=60,
                 )
+
+                # Check if we got a valid statement response regardless of status code
+                try:
+                    response_data = response.json()
+                    if "id" in response_data and response.status_code < 500:
+                        # Got a statement ID, consider it success
+                        break
+                except (ValueError, KeyError):
+                    pass
 
                 if response.status_code == 201:
                     break
@@ -740,38 +782,19 @@ class FabricSparkEngineAdapter(EngineAdapter):
 
     def close(self) -> None:
         """Close the Livy session and release resources."""
+        # Only clear the instance reference, but keep shared sessions alive
+        # for other adapter instances to reuse
         if self._livy_session_id is not None:
-            try:
-                # Try to gracefully close the session, but don't fail if it doesn't work
-                max_retries = 2  # Fewer retries for cleanup
-                for attempt in range(max_retries):
-                    try:
-                        response = requests.delete(
-                            f"{self._get_livy_endpoint()}/sessions/{self._livy_session_id}",
-                            headers=self._session_headers,
-                            timeout=30,
-                        )
-                        if response.status_code in (200, 204, 404):  # 404 means already deleted
-                            break
-                        elif response.status_code == 430 and attempt < max_retries - 1:
-                            # Rate limit on delete - wait briefly and retry once
-                            time.sleep(2)
-                            continue
-                        else:
-                            logger.warning(
-                                f"Failed to close Livy session: HTTP {response.status_code}"
-                            )
-                            break
-                    except Exception as e:
-                        if attempt < max_retries - 1:
-                            time.sleep(1)
-                            continue
-                        logger.warning(f"Failed to close Livy session: {e}")
-                        break
-            finally:
-                self._livy_session_id = None
+            logger.debug(f"Releasing instance reference to session {self._livy_session_id}")
+            self._livy_session_id = None
 
         super().close()
+
+    @classmethod
+    def cleanup_shared_sessions(cls) -> None:
+        """Clean up all shared sessions. Use sparingly, only when needed."""
+        logger.info(f"Cleaning up {len(cls._shared_session_pool)} shared sessions")
+        cls._shared_session_pool.clear()
 
     def _begin_session(self, properties: SessionProperties) -> t.Any:
         """Begin a new session - ensure Livy session is created."""
