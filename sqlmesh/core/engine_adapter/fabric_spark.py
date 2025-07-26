@@ -12,6 +12,8 @@ from sqlglot import exp
 from sqlmesh.core.dialect import to_schema
 from sqlmesh.core.engine_adapter.shared import (
     CatalogSupport,
+    CommentCreationTable,
+    CommentCreationView,
     DataObject,
     DataObjectType,
     InsertOverwriteStrategy,
@@ -49,6 +51,11 @@ class FabricSparkEngineAdapter(EngineAdapter):
     SUPPORTS_CLONING = False
     SUPPORTS_MATERIALIZED_VIEWS = True
     SUPPORTS_MATERIALIZED_VIEW_SCHEMA = True
+    QUOTE_IDENTIFIERS_IN_VIEWS = True  # Fabric requires quoted identifiers
+
+    # Fabric Spark has limited comment support compared to regular Spark
+    COMMENT_CREATION_TABLE = CommentCreationTable.UNSUPPORTED
+    COMMENT_CREATION_VIEW = CommentCreationView.UNSUPPORTED
 
     # Class-level session pool shared across all adapter instances
     # Format: {lakehouse_id: session_id}
@@ -64,8 +71,60 @@ class FabricSparkEngineAdapter(EngineAdapter):
         },
     )
 
+    def _to_sql(self, expression: exp.Expression, quote: bool = True, **kwargs: t.Any) -> str:
+        """
+        Override to ensure all identifiers are always quoted in Fabric Spark.
+        """
+        # Always enable quoting for Fabric, regardless of the quote parameter
+        return super()._to_sql(expression, quote=True, **kwargs)
+
     def __init__(self, connection_factory: t.Callable[[], t.Any], **kwargs: t.Any) -> None:
-        super().__init__(connection_factory, **kwargs)
+        # Create a simple connection wrapper for Fabric Spark that supports cursor interface
+        class FabricConnection:
+            def __init__(self, adapter: "FabricSparkEngineAdapter") -> None:
+                self._adapter = adapter
+                self._last_result = None
+
+            def cursor(self) -> "FabricConnection":
+                return self
+
+            def execute(self, sql: str) -> None:
+                self._adapter.execute(sql)
+                self._last_result = getattr(self._adapter, "_last_result", None)
+
+            def fetchone(self) -> t.Optional[t.Tuple[t.Any, ...]]:
+                if self._last_result is None:
+                    return None
+
+                output = self._last_result.get("output", {})
+                data = output.get("data", {})
+
+                # Handle Fabric's application/json format (preferred)
+                if "application/json" in data:
+                    json_data = data["application/json"]
+                    rows = json_data.get("data", [])
+                    if rows and len(rows) > 0:
+                        return tuple(rows[0])
+
+                # Fallback to text/plain format for compatibility
+                if "text/plain" in data:
+                    text_data = data["text/plain"]
+                    if isinstance(text_data, list) and text_data:
+                        return (
+                            tuple(text_data[0])
+                            if isinstance(text_data[0], list)
+                            else (text_data[0],)
+                        )
+
+                return None
+
+            def close(self) -> None:
+                pass
+
+        def fabric_connection_factory() -> FabricConnection:
+            return FabricConnection(self)
+
+        super().__init__(fabric_connection_factory, **kwargs)
         self._livy_session_id: t.Optional[t.Union[int, str]] = None
         self._session_headers: t.Dict[str, str] = {}
         self._fabric_headers: t.Dict[str, str] = {}
@@ -643,12 +702,42 @@ class FabricSparkEngineAdapter(EngineAdapter):
             schema = json_data.get("schema", {})
 
             if rows and schema:
-                # Extract column names from schema
+                # Extract column names and types from schema
                 fields = schema.get("fields", [])
                 columns = [field.get("name", f"col_{i}") for i, field in enumerate(fields)]
-                return pd.DataFrame(rows, columns=columns)
+
+                # Create DataFrame with proper data type conversion
+                df = pd.DataFrame(rows, columns=columns)
+
+                # Convert columns to appropriate data types based on Spark schema
+                for i, field in enumerate(fields):
+                    col_name = field.get("name", f"col_{i}")
+                    spark_type = field.get("type", "string")
+
+                    # Convert Spark types to pandas types
+                    if col_name in df.columns:
+                        try:
+                            if spark_type in ("integer", "int", "bigint", "long"):
+                                df[col_name] = pd.to_numeric(df[col_name], errors="coerce").astype(
+                                    "Int64"
+                                )
+                            elif spark_type in ("double", "float", "decimal"):
+                                df[col_name] = pd.to_numeric(df[col_name], errors="coerce")
+                            elif spark_type in ("boolean", "bool"):
+                                df[col_name] = df[col_name].astype("boolean")
+                            elif spark_type in ("date", "timestamp"):
+                                df[col_name] = pd.to_datetime(df[col_name], errors="coerce")
+                            # For string types, keep as is
+                        except Exception as e:
+                            # If conversion fails, keep the original data
+                            logger.debug(
+                                f"Failed to convert column {col_name} to type {spark_type}: {e}"
+                            )
+
+                return df
             if rows:
-                # Use rows without column names
+                # Use rows without column names or type information
+                return pd.DataFrame(rows)
                 return pd.DataFrame(rows)
 
         # Fallback to text/plain format for compatibility
@@ -1039,12 +1128,54 @@ AS {query.sql(dialect=self.dialect)}"""
         table = exp.to_table(table_name)
 
         # Extract schema and table name components
-        schema_name = table.db if table.db else "default"
+        # Use "dbo" as the default schema for Fabric (not "default")
+        schema_name = table.db if table.db else "dbo"
         unqualified_table_name = table.name
 
-        # Switch to the target schema first
-        if schema_name != "default":
-            self.execute(f"USE SCHEMA {schema_name}")
+        # Get current schema to restore later
+        current_schema = None
+        if schema_name != "dbo":
+            try:
+                # First, ensure the target schema exists
+                create_schema_sql = f"CREATE SCHEMA IF NOT EXISTS {exp.to_identifier(schema_name, quoted=True).sql(dialect=self.dialect)}"
+                self.execute(create_schema_sql)
+
+                # Try to get current schema
+                result = self._execute_livy_statement("SELECT current_schema()")
+                output = result.get("output", {})
+                data = output.get("data", {})
+                if "application/json" in data:
+                    json_data = data["application/json"]
+                    rows = json_data.get("data", [])
+                    if rows and len(rows) > 0:
+                        current_schema_full = rows[0][0] if isinstance(rows[0], list) else rows[0]
+                        # In Fabric, current_schema() returns fully qualified name like "catalog.workspace.lakehouse.schema"
+                        # We need just the schema part (last component)
+                        if current_schema_full and "." in current_schema_full:
+                            current_schema = current_schema_full.split(".")[-1]
+                        else:
+                            current_schema = current_schema_full
+
+                # Switch to the target schema - always quote schema names in Fabric
+                quoted_schema_name = exp.to_identifier(schema_name, quoted=True).sql(
+                    dialect=self.dialect
+                )
+                self.execute(f"USE SCHEMA {quoted_schema_name}")
+            except Exception as e:
+                logger.warning(f"Failed to switch to schema {schema_name}: {e}")
+                # Continue without schema switching - use fully qualified names instead
+                super()._create_table_from_source_queries(
+                    table_name,  # Use original fully qualified name
+                    source_queries,
+                    columns_to_types=columns_to_types,
+                    exists=exists,
+                    replace=replace,
+                    table_description=table_description,
+                    column_descriptions=column_descriptions,
+                    table_kind=table_kind,
+                    **kwargs,
+                )
+                return
 
         try:
             # Create table expression for the unqualified table name
@@ -1063,9 +1194,19 @@ AS {query.sql(dialect=self.dialect)}"""
                 **kwargs,
             )
         finally:
-            # Switch back to default schema to avoid affecting other operations
-            if schema_name != "default":
-                self.execute("USE SCHEMA default")
+            # Switch back to original schema if we changed it
+            if schema_name != "dbo" and current_schema:
+                try:
+                    # Always quote schema names when restoring
+                    quoted_current_schema = exp.to_identifier(current_schema, quoted=True).sql(
+                        dialect=self.dialect
+                    )
+                    logger.debug(
+                        f"Attempting to restore schema. Original: {current_schema}, Quoted: {quoted_current_schema}"
+                    )
+                    self.execute(f"USE SCHEMA {quoted_current_schema}")
+                except Exception as e:
+                    logger.warning(f"Failed to switch back to schema {current_schema}: {e}")
 
     def close(self) -> None:
         """Close the Livy session and release resources."""
