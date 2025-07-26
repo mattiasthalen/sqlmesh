@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import random
 import time
 import typing as t
 
@@ -143,7 +144,7 @@ class FabricSparkEngineAdapter(EngineAdapter):
 
     @property
     def catalog_support(self) -> CatalogSupport:
-        return CatalogSupport.FULL_SUPPORT
+        return CatalogSupport.SINGLE_CATALOG_ONLY
 
     def get_current_catalog(self) -> t.Optional[str]:
         """Return the current catalog (lakehouse) name."""
@@ -156,7 +157,17 @@ class FabricSparkEngineAdapter(EngineAdapter):
     def _create_livy_session(self) -> t.Union[int, str]:
         """Create a new Livy session and return the session ID."""
         if self._livy_session_id is not None:
-            return self._livy_session_id
+            # Check if the existing session is still active
+            if self._check_session_status(self._livy_session_id):
+                return self._livy_session_id
+            # Session is no longer active, clear it
+            self._livy_session_id = None
+
+        # Try to reuse an existing idle session before creating a new one
+        reusable_session_id = self._find_idle_session()
+        if reusable_session_id:
+            self._livy_session_id = reusable_session_id
+            return reusable_session_id
 
         session_config = {
             "name": f"sqlmesh-session-{int(time.time())}",
@@ -167,15 +178,46 @@ class FabricSparkEngineAdapter(EngineAdapter):
             },
         }
 
-        response = requests.post(
-            f"{self._get_livy_endpoint()}/sessions",
-            headers=self._session_headers,
-            json=session_config,
-            timeout=60,
-        )
+        # Retry logic with exponential backoff for rate limits
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    f"{self._get_livy_endpoint()}/sessions",
+                    headers=self._session_headers,
+                    json=session_config,
+                    timeout=60,
+                )
 
-        if response.status_code not in (200, 201):
-            raise SQLMeshError(f"Failed to create Livy session: {response.text}")
+                if response.status_code in (200, 201, 202):
+                    break
+
+                # Check if it's a rate limit error and we can retry
+                if response.status_code == 430 or "rate limit" in response.text.lower():
+                    if attempt < max_retries - 1:
+                        wait_time = (2**attempt) + random.uniform(0, 1)
+                        logger.warning(
+                            f"Rate limit hit, retrying in {wait_time:.2f} seconds "
+                            f"(attempt {attempt + 1}/{max_retries})"
+                        )
+                        time.sleep(wait_time)
+                        continue
+
+                # Non-retryable error or last attempt
+                raise SQLMeshError(f"Failed to create Livy session: {response.text}")
+
+            except requests.RequestException as e:
+                if attempt < max_retries - 1:
+                    wait_time = (2**attempt) + random.uniform(0, 1)
+                    logger.warning(
+                        f"Request failed, retrying in {wait_time:.2f} seconds "
+                        f"(attempt {attempt + 1}/{max_retries}): {e}"
+                    )
+                    time.sleep(wait_time)
+                    continue
+                raise SQLMeshError(
+                    f"Failed to create Livy session after {max_retries} attempts: {e}"
+                )
 
         session_data = response.json()
         # Handle different response formats from Fabric API
@@ -233,21 +275,117 @@ class FabricSparkEngineAdapter(EngineAdapter):
 
         raise SQLMeshError(f"Livy session did not become ready within {timeout} seconds")
 
+    def _check_session_status(self, session_id: t.Union[int, str]) -> bool:
+        """Check if a Livy session is still active."""
+        try:
+            response = requests.get(
+                f"{self._get_livy_endpoint()}/sessions/{session_id}",
+                headers=self._session_headers,
+                timeout=30,
+            )
+
+            if response.status_code == 404:
+                return False  # Session doesn't exist
+            if response.status_code != 200:
+                logger.warning(f"Failed to check session status: {response.text}")
+                return False
+
+            session_data = response.json()
+            state = session_data.get("state")
+
+            # Session is active if it's in idle, busy, or starting state
+            return state in ["idle", "busy", "starting"]
+
+        except requests.RequestException as e:
+            logger.warning(f"Error checking session status: {e}")
+            return False
+
+    def _find_idle_session(self) -> t.Optional[t.Union[int, str]]:
+        """Find an existing idle SQLMesh session that can be reused."""
+        try:
+            response = requests.get(
+                f"{self._get_livy_endpoint()}/sessions",
+                headers=self._session_headers,
+                timeout=30,
+            )
+
+            if response.status_code != 200:
+                logger.debug(f"Failed to list sessions: {response.text}")
+                return None
+
+            sessions_data = response.json()
+            sessions = sessions_data.get("sessions", [])
+
+            # Look for an idle session with SQLMesh naming pattern
+            for session in sessions:
+                session_name = session.get("name", "")
+                session_state = session.get("state")
+                session_id = session.get("id")
+
+                if (
+                    session_name.startswith("sqlmesh-session-")
+                    and session_state == "idle"
+                    and session_id is not None
+                ):
+                    logger.info(f"Reusing existing idle session: {session_id}")
+                    return session_id
+
+            return None
+
+        except requests.RequestException as e:
+            logger.debug(f"Error listing sessions: {e}")
+            return None
+
+    def _is_session_active(self) -> bool:
+        """Indicates whether or not a session is active."""
+        return self._livy_session_id is not None and self._check_session_status(
+            self._livy_session_id
+        )
+
     def _execute_livy_statement(self, sql: str) -> t.Dict[str, t.Any]:
         """Execute a SQL statement through Livy and return the result."""
         session_id = self._create_livy_session()
 
         statement_config = {"code": sql, "kind": "sql"}
 
-        response = requests.post(
-            f"{self._get_livy_endpoint()}/sessions/{session_id}/statements",
-            headers=self._session_headers,
-            json=statement_config,
-            timeout=60,
-        )
+        # Retry logic with exponential backoff for rate limits
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    f"{self._get_livy_endpoint()}/sessions/{session_id}/statements",
+                    headers=self._session_headers,
+                    json=statement_config,
+                    timeout=60,
+                )
 
-        if response.status_code != 201:
-            raise SQLMeshError(f"Failed to submit statement: {response.text}")
+                if response.status_code == 201:
+                    break
+
+                # Check if it's a rate limit error and we can retry
+                if response.status_code == 430 or "rate limit" in response.text.lower():
+                    if attempt < max_retries - 1:
+                        wait_time = (2**attempt) + random.uniform(0, 1)
+                        logger.warning(
+                            f"Statement submission rate limit hit, retrying in {wait_time:.2f} seconds "
+                            f"(attempt {attempt + 1}/{max_retries})"
+                        )
+                        time.sleep(wait_time)
+                        continue
+
+                # Non-retryable error or last attempt
+                raise SQLMeshError(f"Failed to submit statement: {response.text}")
+
+            except requests.RequestException as e:
+                if attempt < max_retries - 1:
+                    wait_time = (2**attempt) + random.uniform(0, 1)
+                    logger.warning(
+                        f"Statement submission request failed, retrying in {wait_time:.2f} seconds "
+                        f"(attempt {attempt + 1}/{max_retries}): {e}"
+                    )
+                    time.sleep(wait_time)
+                    continue
+                raise SQLMeshError(f"Failed to submit statement after {max_retries} attempts: {e}")
 
         statement_data = response.json()
         statement_id = statement_data["id"]
@@ -402,67 +540,30 @@ class FabricSparkEngineAdapter(EngineAdapter):
         return pd.DataFrame()
 
     def create_catalog(self, catalog_name: t.Union[str, exp.Identifier]) -> None:
-        """Create a lakehouse (catalog) using Fabric REST API."""
-        # Convert to string if Identifier
+        """Create catalog operation not supported - single lakehouse only."""
         if isinstance(catalog_name, exp.Identifier):
             catalog_name_str = catalog_name.this
         else:
             catalog_name_str = catalog_name
 
-        # Check if lakehouse already exists
-        if self._lakehouse_exists(catalog_name_str):
-            return
-
-        lakehouse_config = {
-            "displayName": catalog_name_str,
-            "type": "Lakehouse",
-            "enableSchemas": True,
-        }
-
-        response = requests.post(
-            f"{self.fabric_endpoint}/items",
-            headers=self._fabric_headers,
-            json=lakehouse_config,
-            timeout=60,
-        )
-
-        if response.status_code == 202:
-            # Handle async lakehouse creation - poll the location header for completion
-            location = response.headers.get("Location")
-            if not location:
-                raise SQLMeshError(
-                    "Received 202 but no Location header for polling lakehouse creation"
-                )
-
-            # Wait for lakehouse creation to complete
-            self._wait_for_async_operation(location)
-            return
-        if response.status_code not in (200, 201):
-            if "already exists" in response.text.lower():
-                return
-            raise SQLMeshError(f"Failed to create lakehouse: {response.text}")
+        if catalog_name_str != self.default_lakehouse_name:
+            raise SQLMeshError(
+                f"Cannot create catalog '{catalog_name_str}'. "
+                f"Fabric Spark adapter supports single lakehouse only: '{self.default_lakehouse_name}'"
+            )
 
     def drop_catalog(self, catalog_name: t.Union[str, exp.Identifier]) -> None:
-        """Drop a lakehouse (catalog) using Fabric REST API."""
-        # Convert to string if Identifier
+        """Drop catalog operation not supported - single lakehouse only."""
         if isinstance(catalog_name, exp.Identifier):
             catalog_name_str = catalog_name.this
         else:
             catalog_name_str = catalog_name
 
-        # Get lakehouse ID
-        lakehouse_id = self._get_lakehouse_id(catalog_name_str)
-        if not lakehouse_id:
-            return  # Catalog doesn't exist, nothing to do
-
-        response = requests.delete(
-            f"{self.fabric_endpoint}/items/{lakehouse_id}", headers=self._fabric_headers, timeout=60
-        )
-
-        if response.status_code not in (200, 204):
-            if "not found" in response.text.lower():
-                return
-            raise SQLMeshError(f"Failed to delete lakehouse: {response.text}")
+        if catalog_name_str != self.default_lakehouse_name:
+            raise SQLMeshError(
+                f"Cannot drop catalog '{catalog_name_str}'. "
+                f"Fabric Spark adapter supports single lakehouse only: '{self.default_lakehouse_name}'"
+            )
 
     def create_schema(
         self,
@@ -501,17 +602,55 @@ class FabricSparkEngineAdapter(EngineAdapter):
 
     def _get_lakehouse_id(self, lakehouse_name: str) -> t.Optional[str]:
         """Get lakehouse ID by name using the dedicated lakehouse list endpoint."""
-        response = requests.get(
-            f"{self.fabric_endpoint}/lakehouses", headers=self._fabric_headers, timeout=30
-        )
+        # Retry logic for lakehouse lookup (authentication issues, rate limits)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(
+                    f"{self.fabric_endpoint}/lakehouses", headers=self._fabric_headers, timeout=30
+                )
 
-        if response.status_code != 200:
-            return None
+                if response.status_code == 200:
+                    items = response.json().get("value", [])
+                    for item in items:
+                        if item.get("displayName") == lakehouse_name:
+                            return item.get("id")
+                    return None  # Lakehouse not found in list
 
-        items = response.json().get("value", [])
-        for item in items:
-            if item.get("displayName") == lakehouse_name:
-                return item.get("id")
+                # Check for auth or rate limit errors
+                if response.status_code in (401, 403):
+                    logger.warning(
+                        f"Authentication error getting lakehouse list: {response.status_code}"
+                    )
+                    if attempt < max_retries - 1:
+                        # Re-authenticate and retry
+                        self._setup_authentication()
+                        time.sleep(1)
+                        continue
+                elif response.status_code == 430 or "rate limit" in response.text.lower():
+                    if attempt < max_retries - 1:
+                        wait_time = (2**attempt) + random.uniform(0, 1)
+                        logger.warning(
+                            f"Rate limit getting lakehouse list, retrying in {wait_time:.2f} seconds "
+                            f"(attempt {attempt + 1}/{max_retries})"
+                        )
+                        time.sleep(wait_time)
+                        continue
+
+                logger.warning(f"Failed to get lakehouse list: HTTP {response.status_code}")
+                return None
+
+            except requests.RequestException as e:
+                if attempt < max_retries - 1:
+                    wait_time = (2**attempt) + random.uniform(0, 1)
+                    logger.warning(
+                        f"Request failed getting lakehouse list, retrying in {wait_time:.2f} seconds "
+                        f"(attempt {attempt + 1}/{max_retries}): {e}"
+                    )
+                    time.sleep(wait_time)
+                    continue
+                logger.warning(f"Failed to get lakehouse list after {max_retries} attempts: {e}")
+                return None
 
         return None
 
@@ -522,14 +661,16 @@ class FabricSparkEngineAdapter(EngineAdapter):
         Returns all the data objects that exist in the given schema.
         """
         schema = to_schema(schema_name)
-        catalog_name = schema.catalog or self.default_lakehouse_name
-        schema_db = schema.db or "default"
 
-        # Use SHOW TABLES SQL command through Livy
-        if schema.catalog:
-            show_tables_sql = f"SHOW TABLES FROM {catalog_name}.{schema_db}"
-        else:
-            show_tables_sql = f"SHOW TABLES IN {schema_db}"
+        # Only support queries within the default lakehouse
+        if schema.catalog and schema.catalog != self.default_lakehouse_name:
+            raise SQLMeshError(
+                f"Cannot query catalog '{schema.catalog}'. "
+                f"Fabric Spark adapter supports single lakehouse only: '{self.default_lakehouse_name}'"
+            )
+
+        schema_db = schema.db or "default"
+        show_tables_sql = f"SHOW TABLES IN {schema_db}"
 
         if object_names:
             # Filter by specific table names if provided
@@ -550,7 +691,7 @@ class FabricSparkEngineAdapter(EngineAdapter):
                             table_name = row[1]  # Table name is typically in second column
                             objects.append(
                                 DataObject(
-                                    catalog=catalog_name,
+                                    catalog=self.default_lakehouse_name,
                                     schema=schema_db,
                                     name=table_name,
                                     type=DataObjectType.TABLE,  # Fabric lakehouses primarily contain tables
@@ -566,13 +707,32 @@ class FabricSparkEngineAdapter(EngineAdapter):
         """Close the Livy session and release resources."""
         if self._livy_session_id is not None:
             try:
-                requests.delete(
-                    f"{self._get_livy_endpoint()}/sessions/{self._livy_session_id}",
-                    headers=self._session_headers,
-                    timeout=30,
-                )
-            except Exception as e:
-                logger.warning(f"Failed to close Livy session: {e}")
+                # Try to gracefully close the session, but don't fail if it doesn't work
+                max_retries = 2  # Fewer retries for cleanup
+                for attempt in range(max_retries):
+                    try:
+                        response = requests.delete(
+                            f"{self._get_livy_endpoint()}/sessions/{self._livy_session_id}",
+                            headers=self._session_headers,
+                            timeout=30,
+                        )
+                        if response.status_code in (200, 204, 404):  # 404 means already deleted
+                            break
+                        elif response.status_code == 430 and attempt < max_retries - 1:
+                            # Rate limit on delete - wait briefly and retry once
+                            time.sleep(2)
+                            continue
+                        else:
+                            logger.warning(
+                                f"Failed to close Livy session: HTTP {response.status_code}"
+                            )
+                            break
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            time.sleep(1)
+                            continue
+                        logger.warning(f"Failed to close Livy session: {e}")
+                        break
             finally:
                 self._livy_session_id = None
 

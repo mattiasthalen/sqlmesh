@@ -47,7 +47,7 @@ def test_adapter_properties(fabric_adapter):
     assert fabric_adapter.workspace_id == "test-workspace-id"
     assert fabric_adapter.default_lakehouse_name == "test-lakehouse"
     assert fabric_adapter.DIALECT == "spark"
-    assert fabric_adapter.catalog_support == CatalogSupport.FULL_SUPPORT
+    assert fabric_adapter.catalog_support == CatalogSupport.SINGLE_CATALOG_ONLY
     assert fabric_adapter.SUPPORTS_MATERIALIZED_VIEWS is True
     assert fabric_adapter.SUPPORTS_TRANSACTIONS is False
 
@@ -182,9 +182,12 @@ def test_livy_session_creation():
         # Test session creation
         session_id = adapter._create_livy_session()
 
-        # Verify we got a valid session ID
-        assert isinstance(session_id, int)
-        assert session_id > 0
+        # Verify we got a valid session ID (can be int or string UUID)
+        assert isinstance(session_id, (int, str))
+        if isinstance(session_id, int):
+            assert session_id > 0
+        else:
+            assert len(session_id) > 0
         assert adapter._livy_session_id == session_id
 
         # Test that creating another session reuses the existing one
