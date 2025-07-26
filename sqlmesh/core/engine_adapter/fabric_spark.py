@@ -189,6 +189,16 @@ class FabricSparkEngineAdapter(EngineAdapter):
                     timeout=60,
                 )
 
+                # Microsoft Fabric API might return different status codes for successful session creation
+                # Check if we have a valid response with session ID regardless of status code
+                try:
+                    response_data = response.json()
+                    if "id" in response_data and response.status_code < 500:
+                        # Got a session ID, consider it success even with unexpected status codes
+                        break
+                except (ValueError, KeyError):
+                    pass
+
                 if response.status_code in (200, 201, 202):
                     break
 
@@ -250,7 +260,7 @@ class FabricSparkEngineAdapter(EngineAdapter):
 
         raise SQLMeshError(f"Async operation did not complete within {timeout} seconds")
 
-    def _wait_for_session_ready(self, session_id: t.Union[int, str], timeout: int = 300) -> None:
+    def _wait_for_session_ready(self, session_id: t.Union[int, str], timeout: int = 120) -> None:
         """Wait for Livy session to be in 'idle' state."""
         start_time = time.time()
         while time.time() - start_time < timeout:
@@ -260,20 +270,42 @@ class FabricSparkEngineAdapter(EngineAdapter):
                 timeout=30,
             )
 
-            if response.status_code != 200:
+            if response.status_code == 404:
+                # Session might not be visible yet or was cleaned up
+                logger.debug(f"Session {session_id} not found (404), continuing to wait...")
+                time.sleep(5)
+                continue
+            elif response.status_code != 200:
                 raise SQLMeshError(f"Failed to get session status: {response.text}")
 
             session_data = response.json()
             state = session_data.get("state")
 
+            logger.debug(f"Session {session_id} state: {state}")
+
             if state == "idle":
                 return
             if state in ["error", "dead", "killed"]:
                 raise SQLMeshError(f"Livy session failed with state: {state}")
+            elif state in ["not_started", "starting", "busy", "shutting_down"]:
+                # These are normal intermediate states, continue waiting
+                logger.debug(
+                    f"Session {session_id} in intermediate state '{state}', continuing to wait..."
+                )
+                time.sleep(5)
+            elif state == "success":
+                # Session stopped successfully, but we need it to be idle
+                raise SQLMeshError(f"Livy session stopped unexpectedly with state: {state}")
+            else:
+                # Unknown state, log it but continue waiting
+                logger.warning(
+                    f"Unknown session state '{state}' for session {session_id}, continuing to wait..."
+                )
+                time.sleep(5)
 
-            time.sleep(5)
-
-        raise SQLMeshError(f"Livy session did not become ready within {timeout} seconds")
+        raise SQLMeshError(
+            f"Livy session {session_id} did not become ready within {timeout} seconds. Last state: {session_data.get('state', 'unknown')}"
+        )
 
     def _check_session_status(self, session_id: t.Union[int, str]) -> bool:
         """Check if a Livy session is still active."""
@@ -293,8 +325,8 @@ class FabricSparkEngineAdapter(EngineAdapter):
             session_data = response.json()
             state = session_data.get("state")
 
-            # Session is active if it's in idle, busy, or starting state
-            return state in ["idle", "busy", "starting"]
+            # Session is active if it's in any non-terminal state
+            return state in ["not_started", "starting", "idle", "busy", "shutting_down"]
 
         except requests.RequestException as e:
             logger.warning(f"Error checking session status: {e}")
@@ -314,20 +346,23 @@ class FabricSparkEngineAdapter(EngineAdapter):
                 return None
 
             sessions_data = response.json()
-            sessions = sessions_data.get("sessions", [])
+            # Handle both possible response formats: {"sessions": [...]} or {"items": [...]}
+            sessions = sessions_data.get("sessions", sessions_data.get("items", []))
 
             # Look for an idle session with SQLMesh naming pattern
             for session in sessions:
                 session_name = session.get("name", "")
-                session_state = session.get("state")
+                # The API response uses "livyState" not "state"
+                session_state = session.get("livyState", session.get("state"))
                 session_id = session.get("id")
 
+                # Reuse sessions in any usable state, not just idle
                 if (
                     session_name.startswith("sqlmesh-session-")
-                    and session_state == "idle"
+                    and session_state in ["not_started", "starting", "idle"]
                     and session_id is not None
                 ):
-                    logger.info(f"Reusing existing idle session: {session_id}")
+                    logger.info(f"Reusing existing session {session_id} in state '{session_state}'")
                     return session_id
 
             return None
