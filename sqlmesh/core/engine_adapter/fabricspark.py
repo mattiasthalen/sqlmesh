@@ -17,13 +17,17 @@ from sqlmesh.core.engine_adapter.shared import (
     CatalogSupport,
     CommentCreationTable,
     CommentCreationView,
+    DataObject,
+    DataObjectType,
     InsertOverwriteStrategy,
     set_catalog,
+    to_schema,
 )
 from sqlmesh.core.schema_diff import SchemaDiffer
 
 if t.TYPE_CHECKING:
     from azure.core.credentials import AccessToken
+    from sqlmesh.core._typing import SchemaName
 
 logger = logging.getLogger(__name__)
 
@@ -509,3 +513,78 @@ class FabricSparkEngineAdapter(
         # Fabric uses lakehouse concepts, but Spark SQL still has database/schema
         result = self.fetchone("SELECT current_database()")
         return result[0] if result else "default"  # type: ignore
+
+    def _get_data_objects(
+        self, schema_name: "SchemaName", object_names: t.Optional[t.Set[str]] = None
+    ) -> t.List[DataObject]:
+        """Get data objects (tables, views) from the specified schema."""
+        schema_name = to_schema(schema_name).sql(dialect=self.dialect)
+
+        # Fabric Spark: Try both SHOW TABLE EXTENDED and SHOW TABLES approaches
+        # First try the extended version for permanent tables
+        data_objects = []
+        catalog = self.get_current_catalog()
+
+        # Try extended table info first
+        pattern = "*" if object_names is None else "|".join(object_names)
+        extended_sql = f"SHOW TABLE EXTENDED IN {schema_name} LIKE '{pattern}'"
+
+        try:
+            results = self.fetchdf(extended_sql).to_dict("records")
+            for row in results:
+                if row.get("isTemporary"):
+                    continue
+
+                schema = row.get("namespace") or row.get("database")
+                data_objects.append(
+                    DataObject(
+                        catalog=catalog,
+                        schema=schema,
+                        name=row["tableName"],
+                        type=(
+                            DataObjectType.VIEW
+                            if "Type: VIEW" in row["information"]
+                            else DataObjectType.TABLE
+                        ),
+                    )
+                )
+        except Exception:
+            pass
+
+        # Also get temporary tables using basic SHOW TABLES (these don't appear in extended view)
+        # Fabric Spark doesn't support "SHOW TABLES IN <database>" properly, so use basic SHOW TABLES
+        try:
+            basic_sql = "SHOW TABLES"
+            basic_results = self.fetchall(basic_sql)
+
+            # Add any tables not already found in extended results
+            existing_names = {obj.name for obj in data_objects}
+
+            for row in basic_results:  # type: ignore
+                # Basic SHOW TABLES format: (database, tableName, isTemporary)
+                if len(row) >= 2:
+                    db_name = row[0] if row[0] else schema_name  # Empty string means current db
+                    table_name = row[1]
+                    is_temp = len(row) > 2 and row[2].lower() == "true"
+
+                    # Only include tables from the requested schema
+                    if db_name != schema_name and row[0]:  # Skip if specific db and doesn't match
+                        continue
+
+                    if table_name and table_name not in existing_names:
+                        # Filter by object_names if specified
+                        if object_names is not None and table_name not in object_names:
+                            continue
+
+                        data_objects.append(
+                            DataObject(
+                                catalog=catalog,
+                                schema=schema_name,
+                                name=table_name,
+                                type=DataObjectType.TABLE,  # Assume table for basic results
+                            )
+                        )
+        except Exception:
+            pass
+
+        return data_objects
