@@ -53,6 +53,7 @@ clickhouse = ["clickhouse-connect"]
 databricks = ["databricks-sql-connector[pyarrow]"]
 dev = [
     "agate==1.7.1",
+    "azure-identity",
     "beautifulsoup4",
     "clickhouse-connect",
     "cryptography",
@@ -103,6 +104,7 @@ dev = [
 dbt = ["dbt-core<2"]
 dlt = ["dlt"]
 duckdb = []
+fabricspark = ["azure-identity"]
 gcppostgres = ["cloud-sql-python-connector[pg8000]>=1.8.0"]
 github = ["PyGithub>=2.6.0"]
 llm = ["langchain", "openai"]
@@ -252,6 +254,7 @@ markers = [
     "clickhouse_cloud: test for Clickhouse (cloud mode)",
     "databricks: test for Databricks",
     "duckdb: test for DuckDB",
+    "fabricspark: test for Microsoft Fabric Spark",
     "motherduck: test for MotherDuck",
     "mssql: test for MSSQL",
     "mysql: test for MySQL",

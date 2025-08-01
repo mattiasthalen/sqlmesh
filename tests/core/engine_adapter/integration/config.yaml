@@ -186,5 +186,19 @@ gateways:
     state_connection:
       type: duckdb
 
+  inttest_fabricspark:
+    connection:
+      type: fabricspark
+      workspace_id: {{ env_var("FABRIC_WORKSPACE_ID") }}
+      lakehouse_id: {{ env_var("FABRIC_LAKEHOUSE_ID") }}
+      database: {{ env_var("FABRIC_DATABASE") }}
+      authentication: service_principal
+      client_id: {{ env_var("FABRIC_CLIENT_ID") }}
+      client_secret: {{ env_var("FABRIC_CLIENT_SECRET") }}
+      tenant_id: {{ env_var("FABRIC_TENANT_ID") }}
+      check_import: false
+    state_connection:
+      type: duckdb
+
 model_defaults:
     dialect: duckdb

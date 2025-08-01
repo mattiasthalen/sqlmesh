@@ -2223,6 +2223,99 @@ class RisingwaveConnectionConfig(ConnectionConfig):
         return init
 
 
+class FabricSparkConnectionConfig(ConnectionConfig):
+    """
+    Microsoft Fabric Spark Connection Configuration.
+
+    This connection uses Livy sessions to connect to Microsoft Fabric Spark compute
+    with Azure authentication.
+
+    Args:
+        workspace_id: The Microsoft Fabric workspace GUID.
+        lakehouse_id: The lakehouse GUID within the workspace.
+        database: The database name to use within the lakehouse.
+        endpoint: The Fabric API endpoint. Defaults to the public endpoint.
+        authentication: Authentication method - 'az_cli' or 'service_principal'.
+        client_id: Azure service principal client ID (required for service_principal auth).
+        client_secret: Azure service principal client secret (required for service_principal auth).
+        tenant_id: Azure tenant ID (required for service_principal auth).
+        access_token: Pre-obtained access token (optional, overrides other auth methods).
+        spark_config: Additional Spark session configuration.
+        connect_retries: Number of connection retry attempts.
+        connect_timeout: Connection timeout in seconds.
+    """
+
+    workspace_id: str
+    lakehouse_id: str
+    database: str
+    endpoint: str = "https://api.fabric.microsoft.com/v1"
+    authentication: t.Literal["az_cli", "service_principal"] = "service_principal"
+    client_id: t.Optional[str] = None
+    client_secret: t.Optional[str] = None
+    tenant_id: t.Optional[str] = None
+    access_token: t.Optional[str] = None
+    spark_config: t.Dict[str, t.Any] = {"name": "sqlmesh-session"}
+    connect_retries: int = 1
+    connect_timeout: int = 10
+
+    concurrent_tasks: int = 1  # Livy sessions are typically single-threaded
+    register_comments: bool = True
+    pre_ping: t.Literal[False] = False  # Livy sessions don't support ping
+
+    type_: t.Literal["fabricspark"] = Field(alias="type", default="fabricspark")
+    DIALECT: t.ClassVar[t.Literal["spark"]] = "spark"
+    DISPLAY_NAME: t.ClassVar[t.Literal["Microsoft Fabric Spark"]] = "Microsoft Fabric Spark"
+    DISPLAY_ORDER: t.ClassVar[t.Literal[17]] = 17
+
+    @model_validator(mode="before")
+    def _validate_auth_config(cls, data: t.Any) -> t.Any:
+        if not isinstance(data, dict):
+            return data
+
+        auth_method = data.get("authentication", "az_cli")
+
+        if auth_method == "service_principal":
+            required_fields = ["client_id", "client_secret", "tenant_id"]
+            missing_fields = [field for field in required_fields if not data.get(field)]
+            if missing_fields:
+                raise ConfigError(
+                    f"Service principal authentication requires: {', '.join(missing_fields)}"
+                )
+
+        return data
+
+    _engine_import_validator = _get_engine_import_validator(
+        "azure.identity", "fabricspark", "fabric-spark"
+    )
+
+    @property
+    def _connection_kwargs_keys(self) -> t.Set[str]:
+        return {
+            "workspace_id",
+            "lakehouse_id",
+            "database",
+            "endpoint",
+            "authentication",
+            "client_id",
+            "client_secret",
+            "tenant_id",
+            "access_token",
+            "spark_config",
+            "connect_retries",
+            "connect_timeout",
+        }
+
+    @property
+    def _engine_adapter(self) -> t.Type[EngineAdapter]:
+        return engine_adapter.FabricSparkEngineAdapter
+
+    @property
+    def _connection_factory(self) -> t.Callable:
+        from sqlmesh.core.engine_adapter.fabricspark import fabricspark_connect
+
+        return fabricspark_connect
+
+
 CONNECTION_CONFIG_TO_TYPE = {
     # Map all subclasses of ConnectionConfig to the value of their `type_` field.
     tpe.all_field_infos()["type_"].default: tpe
