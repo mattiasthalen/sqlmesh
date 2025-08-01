@@ -68,27 +68,10 @@ def test_get_current_catalog_fallback(mocker: MockerFixture, adapter: FabricSpar
     assert result == "spark_catalog"
 
 
-def test_set_current_catalog(mocker: MockerFixture, adapter: FabricSparkEngineAdapter):
-    """Test setting current catalog."""
-    execute_mock = mocker.patch.object(adapter, "execute")
-
-    adapter.set_current_catalog("test_catalog")
-
-    # Fabric Spark only supports single catalog, so no USE CATALOG command should be executed
-    execute_mock.assert_not_called()
-
-
-def test_set_current_catalog_failure(mocker: MockerFixture, adapter: FabricSparkEngineAdapter):
-    """Test setting current catalog with failure (should not raise)."""
-    execute_mock = mocker.patch.object(
-        adapter, "execute", side_effect=Exception("Catalog not found")
-    )
-
-    # Should not raise an exception since it's a no-op for single catalog support
-    adapter.set_current_catalog("test_catalog")
-
-    # No execute call should be made since Fabric Spark only supports single catalog
-    execute_mock.assert_not_called()
+def test_set_current_catalog_not_supported(adapter: FabricSparkEngineAdapter):
+    """Test that setting current catalog raises NotImplementedError for single-catalog engines."""
+    with pytest.raises(NotImplementedError):
+        adapter.set_current_catalog("test_catalog")
 
 
 def test_get_current_database(mocker: MockerFixture, adapter: FabricSparkEngineAdapter):

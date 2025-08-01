@@ -503,12 +503,6 @@ class FabricSparkEngineAdapter(
             # Fallback if current_catalog() is not available
             return "spark_catalog"
 
-    def set_current_catalog(self, catalog_name: str) -> None:
-        """Set the current catalog for the Fabric connection."""
-        # Fabric Spark only supports a single catalog, so catalog switching is not supported
-        # This is a no-op but we don't raise an error to maintain compatibility
-        pass
-
     def get_current_database(self) -> str:
         """Get the current database (schema) from Fabric Spark."""
         # Fabric uses lakehouse concepts, but Spark SQL still has database/schema

@@ -2310,6 +2310,10 @@ class FabricSparkConnectionConfig(ConnectionConfig):
         return engine_adapter.FabricSparkEngineAdapter
 
     @property
+    def _extra_engine_config(self) -> t.Dict[str, t.Any]:
+        return {"catalog_support": CatalogSupport.SINGLE_CATALOG_ONLY}
+
+    @property
     def _connection_factory(self) -> t.Callable:
         from sqlmesh.core.engine_adapter.fabricspark import fabricspark_connect
 
