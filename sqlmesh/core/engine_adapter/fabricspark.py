@@ -26,6 +26,7 @@ from sqlmesh.core.engine_adapter.shared import (
 from sqlmesh.core.schema_diff import SchemaDiffer
 
 if t.TYPE_CHECKING:
+    import pandas as pd
     from azure.core.credentials import AccessToken
     from sqlmesh.core._typing import SchemaName
 
@@ -514,51 +515,43 @@ class FabricSparkEngineAdapter(
         result = self.fetchone("SELECT current_database()")
         return result[0] if result else "default"  # type: ignore
 
+    def fetchdf(
+        self, query: t.Union[exp.Expression, str], quote_identifiers: bool = False
+    ) -> "pd.DataFrame":
+        """Fetch a Pandas DataFrame from a query."""
+        import pandas as pd
+
+        results = self.fetchall(query, quote_identifiers=quote_identifiers)
+        if not results:
+            return pd.DataFrame()
+
+        # Get column names from cursor description if available
+        if hasattr(self.cursor, "description") and self.cursor.description:
+            columns = [desc[0] for desc in self.cursor.description]
+        else:
+            # Fallback: use generic column names
+            columns = [f"col_{i}" for i in range(len(results[0]) if results else 0)]
+
+        return pd.DataFrame(results, columns=columns)
+
     def _get_data_objects(
         self, schema_name: "SchemaName", object_names: t.Optional[t.Set[str]] = None
     ) -> t.List[DataObject]:
         """Get data objects (tables, views) from the specified schema."""
         schema_name = to_schema(schema_name).sql(dialect=self.dialect)
 
-        # Fabric Spark: Try both SHOW TABLE EXTENDED and SHOW TABLES approaches
-        # First try the extended version for permanent tables
+        # Fabric Spark: Use SHOW TABLES approach since SHOW TABLE EXTENDED may not work reliably
         data_objects = []
         catalog = self.get_current_catalog()
 
-        # Try extended table info first
-        pattern = "*" if object_names is None else "|".join(object_names)
-        extended_sql = f"SHOW TABLE EXTENDED IN {schema_name} LIKE '{pattern}'"
-
         try:
-            results = self.fetchdf(extended_sql).to_dict("records")
-            for row in results:
-                if row.get("isTemporary"):
-                    continue
+            # Use basic SHOW TABLES with schema context
+            if schema_name and schema_name != "default":
+                # Ensure we're using the correct schema
+                self.execute(f"USE {schema_name}")
 
-                schema = row.get("namespace") or row.get("database")
-                data_objects.append(
-                    DataObject(
-                        catalog=catalog,
-                        schema=schema,
-                        name=row["tableName"],
-                        type=(
-                            DataObjectType.VIEW
-                            if "Type: VIEW" in row["information"]
-                            else DataObjectType.TABLE
-                        ),
-                    )
-                )
-        except Exception:
-            pass
-
-        # Also get temporary tables using basic SHOW TABLES (these don't appear in extended view)
-        # Fabric Spark doesn't support "SHOW TABLES IN <database>" properly, so use basic SHOW TABLES
-        try:
             basic_sql = "SHOW TABLES"
             basic_results = self.fetchall(basic_sql)
-
-            # Add any tables not already found in extended results
-            existing_names = {obj.name for obj in data_objects}
 
             for row in basic_results:  # type: ignore
                 # Basic SHOW TABLES format: (database, tableName, isTemporary)
@@ -567,11 +560,15 @@ class FabricSparkEngineAdapter(
                     table_name = row[1]
                     is_temp = len(row) > 2 and row[2].lower() == "true"
 
+                    # Skip temporary tables
+                    if is_temp:
+                        continue
+
                     # Only include tables from the requested schema
                     if db_name != schema_name and row[0]:  # Skip if specific db and doesn't match
                         continue
 
-                    if table_name and table_name not in existing_names:
+                    if table_name:
                         # Filter by object_names if specified
                         if object_names is not None and table_name not in object_names:
                             continue
@@ -579,7 +576,7 @@ class FabricSparkEngineAdapter(
                         data_objects.append(
                             DataObject(
                                 catalog=catalog,
-                                schema=schema_name,
+                                schema=db_name or schema_name,
                                 name=table_name,
                                 type=DataObjectType.TABLE,  # Assume table for basic results
                             )
