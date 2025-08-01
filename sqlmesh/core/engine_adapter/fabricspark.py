@@ -315,14 +315,18 @@ class FabricSparkCursor:
         rows = []
 
         # Find data rows (skip header and separator lines)
-        in_data = False
+        # Spark .show() format: +---+, |header|, +---+, |data|, +---+
+        header_seen = False
         for line in lines:
             line = line.strip()
             if line.startswith("+") and "---" in line:
-                in_data = not in_data  # Toggle when we see separator
-                continue
-            if in_data and line.startswith("|") and line.endswith("|"):
-                # Parse row data
+                continue  # Skip separator lines
+            if line.startswith("|") and line.endswith("|"):
+                if not header_seen:
+                    # Skip the header row
+                    header_seen = True
+                    continue
+                # Parse data row
                 values = [val.strip() for val in line[1:-1].split("|")]
                 # Convert values to appropriate types
                 parsed_values: List[Any] = []
@@ -469,7 +473,7 @@ class FabricSparkEngineAdapter(
 
     @property
     def catalog_support(self) -> CatalogSupport:
-        return CatalogSupport.FULL_SUPPORT
+        return CatalogSupport.SINGLE_CATALOG_ONLY
 
     def _get_temp_table(
         self, table: t.Union[exp.Table, str], table_only: bool = False, quoted: bool = True
@@ -486,21 +490,22 @@ class FabricSparkEngineAdapter(
 
     def get_current_catalog(self) -> t.Optional[str]:
         """Get the current catalog from the Fabric connection."""
-        # For Fabric, this would typically be the lakehouse name
+        # Fabric Spark uses a single catalog model
         try:
-            return self.fetchone(exp.select(exp.func("current_catalog")))[0]  # type: ignore
+            result = self.fetchone("SELECT current_catalog()")
+            return result[0] if result else None  # type: ignore
         except Exception:
             # Fallback if current_catalog() is not available
             return "spark_catalog"
 
     def set_current_catalog(self, catalog_name: str) -> None:
         """Set the current catalog for the Fabric connection."""
-        try:
-            self.execute(f"USE CATALOG {catalog_name}")
-        except Exception as e:
-            logger.warning(f"Failed to set catalog {catalog_name}: {e}")
+        # Fabric Spark only supports a single catalog, so catalog switching is not supported
+        # This is a no-op but we don't raise an error to maintain compatibility
+        pass
 
     def get_current_database(self) -> str:
         """Get the current database (schema) from Fabric Spark."""
         # Fabric uses lakehouse concepts, but Spark SQL still has database/schema
-        return self.fetchone(exp.select(exp.func("current_database")))[0]  # type: ignore
+        result = self.fetchone("SELECT current_database()")
+        return result[0] if result else "default"  # type: ignore
