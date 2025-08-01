@@ -198,9 +198,14 @@ class LivySession:
             self.create_session()
 
         url = f"{self.credentials.lakehouse_endpoint}/sessions/{self.session_id}/statements"
-        payload = {"code": code}
+        # Fabric Livy requires statements to be wrapped in spark.sql() with kind="spark"
+        # Use .show() to get formatted results that we can parse
+        wrapped_code = f'spark.sql("{code.replace('"', '\\"')}").show()'
+        payload = {"code": wrapped_code, "kind": "spark"}
 
         response = requests.post(url, json=payload, headers=self._headers())
+        if response.status_code >= 400:
+            logger.error(f"HTTP {response.status_code} error for {url}: {response.text}")
         response.raise_for_status()
 
         statement_data = response.json()
@@ -292,9 +297,45 @@ class FabricSparkCursor:
                         for field in schema.get("fields", [])
                     ]
         elif "text/plain" in data:
-            # Handle text output (for non-SELECT statements)
+            # Handle text output from .show() or other text results
             text_output = data["text/plain"]
-            self._last_output = [(text_output,)]
+            # Try to parse Spark DataFrame .show() output
+            if self._is_spark_show_output(text_output):
+                self._last_output = self._parse_spark_show_output(text_output)
+            else:
+                self._last_output = [(text_output,)]
+
+    def _is_spark_show_output(self, text: str) -> bool:
+        """Check if text output is from Spark DataFrame .show()"""
+        return "+---" in text or "only showing top" in text.lower()
+
+    def _parse_spark_show_output(self, text: str) -> List[Tuple]:
+        """Parse Spark DataFrame .show() output into rows"""
+        lines = text.strip().split("\n")
+        rows = []
+
+        # Find data rows (skip header and separator lines)
+        in_data = False
+        for line in lines:
+            line = line.strip()
+            if line.startswith("+") and "---" in line:
+                in_data = not in_data  # Toggle when we see separator
+                continue
+            if in_data and line.startswith("|") and line.endswith("|"):
+                # Parse row data
+                values = [val.strip() for val in line[1:-1].split("|")]
+                # Convert values to appropriate types
+                parsed_values: List[Any] = []
+                for val in values:
+                    if val.isdigit():
+                        parsed_values.append(int(val))
+                    elif val.replace(".", "").isdigit():
+                        parsed_values.append(float(val))
+                    else:
+                        parsed_values.append(val)
+                rows.append(tuple(parsed_values))
+
+        return rows
 
     def fetchone(self) -> Optional[Tuple]:
         """Fetch one row from the result."""
