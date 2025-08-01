@@ -65,13 +65,17 @@ def test_temp_table_creation(ctx: TestContext, engine_adapter: FabricSparkEngine
     assert "fabric_temp_" in temp_table.sql() or "__temp_" not in temp_table.sql()
 
 
-def test_catalog_operations(ctx: TestContext, engine_adapter: FabricSparkEngineAdapter):
-    """Test catalog-related operations."""
-    # Test getting current catalog
+def test_single_catalog_support(ctx: TestContext, engine_adapter: FabricSparkEngineAdapter):
+    """Test single-catalog engine behavior."""
+    # Test getting current catalog (should work)
     current_catalog = engine_adapter.get_current_catalog()
     assert current_catalog is not None
 
-    # Test getting current database
+    # Test that setting catalog is not supported
+    with pytest.raises(NotImplementedError):
+        engine_adapter.set_current_catalog("some_catalog")
+
+    # Test getting current database (should work)
     current_database = engine_adapter.get_current_database()
     assert current_database is not None
 
@@ -185,6 +189,11 @@ def test_fabric_spark_specific_features(ctx: TestContext, engine_adapter: Fabric
 
     # Test dialect is spark
     assert engine_adapter.DIALECT == "spark"
+
+    # Test single-catalog support
+    from sqlmesh.core.engine_adapter.shared import CatalogSupport
+
+    assert engine_adapter.catalog_support == CatalogSupport.SINGLE_CATALOG_ONLY
 
 
 def test_livy_session_connectivity(ctx: TestContext, engine_adapter: FabricSparkEngineAdapter):
