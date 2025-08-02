@@ -173,7 +173,7 @@ clickhouse-cloud-test: guard-CLICKHOUSE_CLOUD_HOST guard-CLICKHOUSE_CLOUD_USERNA
 athena-test: guard-AWS_ACCESS_KEY_ID guard-AWS_SECRET_ACCESS_KEY guard-ATHENA_S3_WAREHOUSE_LOCATION engine-athena-install
 	pytest -n auto -m "athena" --retries 3 --junitxml=test-results/junit-athena.xml
 
-fabricspark-test: guard-FABRIC_WORKSPACE_ID guard-FABRIC_LAKEHOUSE_ID guard-FABRIC_DATABASE guard-FABRIC_CLIENT_ID guard-FABRIC_CLIENT_SECRET guard-FABRIC_TENANT_ID engine-fabricspark-install
+fabricspark-test: guard-FABRIC_WORKSPACE_ID guard-FABRIC_LAKEHOUSE_ID guard-FABRIC_LAKEHOUSE guard-FABRIC_CLIENT_ID guard-FABRIC_CLIENT_SECRET guard-FABRIC_TENANT_ID engine-fabricspark-install
 	pytest -n auto -m "fabricspark" --retries 3 --junitxml=test-results/junit-fabricspark.xml
 
 vscode_settings:

@@ -203,10 +203,8 @@ class LivySession:
             self.create_session()
 
         url = f"{self.credentials.lakehouse_endpoint}/sessions/{self.session_id}/statements"
-        # Fabric Livy requires statements to be wrapped in spark.sql() with kind="spark"
-        # Use .show() to get formatted results that we can parse
-        wrapped_code = f'spark.sql("{code.replace('"', '\\"')}").show()'
-        payload = {"code": wrapped_code, "kind": "spark"}
+        # Use direct SQL execution like dbt-fabricspark does
+        payload = {"code": code, "kind": "sql"}
 
         response = requests.post(url, json=payload, headers=self._headers())
         if response.status_code >= 400:
@@ -285,30 +283,77 @@ class FabricSparkCursor:
         self._last_output_cursor = 0
 
         output = result.get("output", {})
+
+        # Check if the query executed successfully
+        if output.get("status") != "ok":
+            error_msg = output.get("evalue", "Unknown error")
+            raise RuntimeError(f"Query failed: {error_msg}")
+
         data = output.get("data", {})
 
         if "application/json" in data:
-            # Parse JSON result
+            # Parse JSON result (direct from Livy like dbt does)
             json_data = data["application/json"]
             if isinstance(json_data, dict) and "data" in json_data:
                 rows = json_data["data"]
-                self._last_output = [tuple(row) for row in rows]
+                # Convert string values to appropriate Python types
+                converted_rows = []
+                for row in rows:
+                    converted_row = []
+                    for val in row:
+                        converted_row.append(self._convert_value(val))
+                    converted_rows.append(tuple(converted_row))
+                self._last_output = converted_rows
 
                 # Set description if available
                 if "schema" in json_data:
                     schema = json_data["schema"]
                     self.description = [
-                        (field["name"], field["type"], None, None, None, None, True)
+                        (
+                            field["name"],
+                            field["type"],
+                            None,
+                            None,
+                            None,
+                            None,
+                            field.get("nullable", True),
+                        )
                         for field in schema.get("fields", [])
                     ]
-        elif "text/plain" in data:
-            # Handle text output from .show() or other text results
-            text_output = data["text/plain"]
-            # Try to parse Spark DataFrame .show() output
-            if self._is_spark_show_output(text_output):
-                self._last_output = self._parse_spark_show_output(text_output)
             else:
-                self._last_output = [(text_output,)]
+                # Handle case where there's no data (e.g., DDL statements)
+                self._last_output = []
+                self.description = None
+        elif "text/plain" in data:
+            # Fallback for text output (shouldn't happen with kind="sql")
+            text_output = data["text/plain"]
+            self._last_output = [(text_output,)]
+        else:
+            # No data returned (e.g., successful DDL)
+            self._last_output = []
+            self.description = None
+
+    def _convert_value(self, val: Any) -> Any:
+        """Convert string values from Livy JSON to appropriate Python types."""
+        if val is None:
+            return None
+        if isinstance(val, str):
+            # Handle null values
+            if val.lower() in ("null", "none", ""):
+                return None
+            # Handle boolean values
+            if val.lower() in ("true", "false"):
+                return val.lower() == "true"
+            # Handle integers (including negative)
+            if val.lstrip("-").isdigit():
+                return int(val)
+            # Handle floats (including negative)
+            if val.replace(".", "", 1).replace("-", "", 1).isdigit() and "." in val:
+                return float(val)
+            # Keep as string for everything else
+            return val
+        # Already the right type
+        return val
 
     def _is_spark_show_output(self, text: str) -> bool:
         """Check if text output is from Spark DataFrame .show()"""
@@ -336,11 +381,20 @@ class FabricSparkCursor:
                 # Convert values to appropriate types
                 parsed_values: List[Any] = []
                 for val in values:
-                    if val.isdigit():
+                    # Handle null values
+                    if val.lower() in ("null", "none", ""):
+                        parsed_values.append(None)
+                    # Handle boolean values
+                    elif val.lower() in ("true", "false"):
+                        parsed_values.append(val.lower() == "true")
+                    # Handle integers (including negative)
+                    elif val.lstrip("-").isdigit():
                         parsed_values.append(int(val))
-                    elif val.replace(".", "").isdigit():
+                    # Handle floats (including negative)
+                    elif val.replace(".", "", 1).replace("-", "", 1).isdigit() and "." in val:
                         parsed_values.append(float(val))
                     else:
+                        # Keep as string for everything else
                         parsed_values.append(val)
                 rows.append(tuple(parsed_values))
 
@@ -508,6 +562,15 @@ class FabricSparkEngineAdapter(
         # Fabric uses lakehouse concepts, but Spark SQL still has database/schema
         result = self.fetchone("SELECT current_database()")
         return result[0] if result else "default"  # type: ignore
+
+    def __init__(
+        self, connection_factory: t.Callable[[], FabricSparkConnection], **kwargs: t.Any
+    ) -> None:
+        """Initialize FabricSpark engine adapter with correct catalog handling."""
+        # Override default_catalog before calling super().__init__
+        # In Fabric, the catalog is always 'spark_catalog', not the database name
+        kwargs["default_catalog"] = "spark_catalog"
+        super().__init__(connection_factory, **kwargs)
 
     def fetchdf(
         self, query: t.Union[exp.Expression, str], quote_identifiers: bool = False

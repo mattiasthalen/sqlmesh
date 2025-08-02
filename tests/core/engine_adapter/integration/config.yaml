@@ -191,7 +191,7 @@ gateways:
       type: fabricspark
       workspace_id: {{ env_var("FABRIC_WORKSPACE_ID") }}
       lakehouse_id: {{ env_var("FABRIC_LAKEHOUSE_ID") }}
-      database: {{ env_var("FABRIC_DATABASE") }}
+      database: {{ env_var("FABRIC_LAKEHOUSE") }}
       authentication: service_principal
       client_id: {{ env_var("FABRIC_CLIENT_ID") }}
       client_secret: {{ env_var("FABRIC_CLIENT_SECRET") }}
