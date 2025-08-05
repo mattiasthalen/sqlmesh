@@ -509,6 +509,7 @@ class FabricSparkEngineAdapter(
 
     DIALECT = "spark"
     SUPPORTS_TRANSACTIONS = False
+    SUPPORTS_MATERIALIZED_VIEWS = True
     INSERT_OVERWRITE_STRATEGY = InsertOverwriteStrategy.INSERT_OVERWRITE
     COMMENT_CREATION_TABLE = CommentCreationTable.UNSUPPORTED
     COMMENT_CREATION_VIEW = CommentCreationView.UNSUPPORTED
