@@ -33,8 +33,8 @@ if t.TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_POLL_WAIT = 10
-DEFAULT_POLL_STATEMENT_WAIT = 5
+DEFAULT_POLL_WAIT = 2  # Reduced from 10 to 2 seconds for faster session startup
+DEFAULT_POLL_STATEMENT_WAIT = 1  # Reduced from 5 to 1 second for faster queries
 AZURE_CREDENTIAL_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
 
 
