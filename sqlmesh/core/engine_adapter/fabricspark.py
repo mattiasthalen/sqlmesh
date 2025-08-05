@@ -510,8 +510,8 @@ class FabricSparkEngineAdapter(
     DIALECT = "spark"
     SUPPORTS_TRANSACTIONS = False
     INSERT_OVERWRITE_STRATEGY = InsertOverwriteStrategy.INSERT_OVERWRITE
-    COMMENT_CREATION_TABLE = CommentCreationTable.IN_SCHEMA_DEF_NO_CTAS
-    COMMENT_CREATION_VIEW = CommentCreationView.IN_SCHEMA_DEF_NO_COMMANDS
+    COMMENT_CREATION_TABLE = CommentCreationTable.UNSUPPORTED
+    COMMENT_CREATION_VIEW = CommentCreationView.UNSUPPORTED
     SUPPORTS_REPLACE_TABLE = False
     QUOTE_IDENTIFIERS_IN_VIEWS = False
 
@@ -530,6 +530,11 @@ class FabricSparkEngineAdapter(
     def use_serverless(self) -> bool:
         """Fabric Spark uses managed compute similar to serverless."""
         return True
+
+    @property
+    def comments_enabled(self) -> bool:
+        """Fabric Spark does not reliably support table/column comments."""
+        return False
 
     @property
     def catalog_support(self) -> CatalogSupport:
@@ -621,22 +626,21 @@ class FabricSparkEngineAdapter(
                         if object_names is not None and table_name not in object_names:
                             continue
 
-                        # Check if this is a table created as a view replacement (has SQLMESH_VIEW comment)
+                        # Check if this is a materialized lake view created by SQLMesh
                         object_type = DataObjectType.TABLE
                         try:
-                            # Try to get table comment to determine if it's a view replacement
+                            # Try to get table properties to determine if it's a materialized lake view
                             desc_sql = (
                                 f"DESCRIBE TABLE EXTENDED {db_name or schema_name_str}.{table_name}"
                             )
                             desc_results = self.fetchall(desc_sql)
-                            for desc_row in desc_results:
-                                if (
-                                    len(desc_row) >= 2
-                                    and str(desc_row[0]).lower() == "comment"
-                                    and "SQLMESH_VIEW" in str(desc_row[1])
-                                ):
-                                    object_type = DataObjectType.VIEW
-                                    break
+                            # Look through all the description rows for table properties
+                            full_description = "\n".join([str(row) for row in desc_results])
+
+                            # Check if this table has the materialized lake view property
+                            if "lakehouse_materialized_view" in full_description.lower():
+                                # Treat materialized lake views as regular views for SQLMesh compatibility
+                                object_type = DataObjectType.VIEW
                         except Exception:
                             pass  # Ignore errors getting table description
 
@@ -753,23 +757,21 @@ class FabricSparkEngineAdapter(
             create_kwargs["properties"] = properties
 
         with source_queries[0] as query:
-            # For Fabric Spark, create a managed table since views aren't supported
-            # We'll handle this specially in metadata discovery to report as views
-            table_name = exp.to_table(view_name).sql(dialect=self.dialect)
+            # For Fabric Spark, create a materialized lake view
+            view_name_sql = exp.to_table(view_name).sql(dialect=self.dialect)
 
             if replace:
-                # Drop existing table if it exists
+                # Drop existing materialized view if it exists (they are stored as tables)
                 try:
-                    self.execute(f"DROP TABLE IF EXISTS {table_name}")
+                    self.execute(f"DROP TABLE IF EXISTS {view_name_sql}")
                 except Exception:
                     pass  # Ignore if doesn't exist
 
-            # Create managed table with comment that includes both the original description and our marker
-            comment_parts = []
-            if table_description:
-                comment_parts.append(table_description)
-            comment_parts.append("SQLMESH_VIEW")
-            comment = " | ".join(comment_parts)
-
-            create_sql = f"CREATE TABLE {table_name} USING DELTA COMMENT '{comment}' AS {query.sql(dialect=self.dialect)}"
+            # Create materialized lake view using Fabric Spark syntax
+            # Reference: https://learn.microsoft.com/en-us/fabric/data-engineering/materialized-lake-views/create-materialized-lake-view
+            create_sql = (
+                f"CREATE OR REPLACE TABLE {view_name_sql} "
+                f"TBLPROPERTIES ('lakehouse.table.type' = 'lakehouse_materialized_view') "
+                f"AS {query.sql(dialect=self.dialect)}"
+            )
             self.execute(create_sql)
