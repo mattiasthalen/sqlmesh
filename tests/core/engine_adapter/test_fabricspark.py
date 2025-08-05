@@ -37,15 +37,6 @@ def test_use_serverless(adapter: FabricSparkEngineAdapter):
     assert adapter.use_serverless is True
 
 
-def test_get_temp_table(adapter: FabricSparkEngineAdapter):
-    """Test temp table name generation for Fabric Spark."""
-    table = adapter._get_temp_table("test_table")
-    table_name = table.args["this"].this
-
-    # Should replace __temp_ with fabric_temp_
-    assert "fabric_temp_" in table_name or "__temp_" not in table_name
-
-
 def test_get_current_catalog(mocker: MockerFixture, adapter: FabricSparkEngineAdapter):
     """Test getting current catalog."""
     fetchone_mock = mocker.patch.object(adapter, "fetchone", return_value=("test_catalog",))

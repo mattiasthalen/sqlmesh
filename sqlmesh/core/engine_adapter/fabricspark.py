@@ -535,19 +535,6 @@ class FabricSparkEngineAdapter(
     def catalog_support(self) -> CatalogSupport:
         return CatalogSupport.SINGLE_CATALOG_ONLY
 
-    def _get_temp_table(
-        self, table: t.Union[exp.Table, str], table_only: bool = False, quoted: bool = True
-    ) -> exp.Table:
-        """
-        Returns the name of the temp table that should be used for the given table name.
-        Fabric Spark has similar temporary table limitations as regular Spark.
-        """
-        table = super()._get_temp_table(table, table_only=table_only)
-        table_name_id = table.args["this"]
-        # Fabric Spark may also have issues with temp tables starting with __temp
-        table_name_id.set("this", table_name_id.this.replace("__temp_", "fabric_temp_"))
-        return table
-
     def get_current_catalog(self) -> t.Optional[str]:
         """Get the current catalog from the Fabric connection."""
         # Fabric Spark uses lakehouse as catalog name
