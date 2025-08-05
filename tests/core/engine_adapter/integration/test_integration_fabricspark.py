@@ -61,8 +61,11 @@ def test_session_establishment_and_retrieval(
     # Test session creation/retrieval
     session_id = livy_session.create_session()
     assert session_id is not None
-    assert isinstance(session_id, str)
-    assert len(session_id) > 0
+    assert isinstance(session_id, (int, str))  # Fabric can return int or string
+    if isinstance(session_id, str):
+        assert len(session_id) > 0
+    else:
+        assert session_id > 0
 
     # Verify session is properly stored
     assert livy_session.session_id == session_id

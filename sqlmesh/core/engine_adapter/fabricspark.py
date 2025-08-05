@@ -28,7 +28,8 @@ from sqlmesh.core.schema_diff import SchemaDiffer
 if t.TYPE_CHECKING:
     import pandas as pd
     from azure.core.credentials import AccessToken
-    from sqlmesh.core._typing import SchemaName
+    from sqlmesh.core._typing import SchemaName, TableName
+    from sqlmesh.core.engine_adapter._typing import QueryOrDF
 
 logger = logging.getLogger(__name__)
 
@@ -549,28 +550,19 @@ class FabricSparkEngineAdapter(
 
     def get_current_catalog(self) -> t.Optional[str]:
         """Get the current catalog from the Fabric connection."""
-        # Fabric Spark uses a single catalog model
+        # Fabric Spark uses lakehouse as catalog name
         try:
             result = self.fetchone("SELECT current_catalog()")
             return result[0] if result else None  # type: ignore
         except Exception:
-            # Fallback if current_catalog() is not available
-            return "spark_catalog"
+            # Fallback to lakehouse name from connection config
+            return self.connection.credentials.database
 
     def get_current_database(self) -> str:
         """Get the current database (schema) from Fabric Spark."""
         # Fabric uses lakehouse concepts, but Spark SQL still has database/schema
         result = self.fetchone("SELECT current_database()")
         return result[0] if result else "default"  # type: ignore
-
-    def __init__(
-        self, connection_factory: t.Callable[[], FabricSparkConnection], **kwargs: t.Any
-    ) -> None:
-        """Initialize FabricSpark engine adapter with correct catalog handling."""
-        # Override default_catalog before calling super().__init__
-        # In Fabric, the catalog is always 'spark_catalog', not the database name
-        kwargs["default_catalog"] = "spark_catalog"
-        super().__init__(connection_factory, **kwargs)
 
     def fetchdf(
         self, query: t.Union[exp.Expression, str], quote_identifiers: bool = False
@@ -595,34 +587,46 @@ class FabricSparkEngineAdapter(
         self, schema_name: "SchemaName", object_names: t.Optional[t.Set[str]] = None
     ) -> t.List[DataObject]:
         """Get data objects (tables, views) from the specified schema."""
-        schema_name = to_schema(schema_name).sql(dialect=self.dialect)
+        schema_name_str = to_schema(schema_name).sql(dialect=self.dialect)
 
         # Fabric Spark: Use SHOW TABLES approach since SHOW TABLE EXTENDED may not work reliably
         data_objects = []
         catalog = self.get_current_catalog()
 
         try:
-            # Use basic SHOW TABLES with schema context
-            if schema_name and schema_name != "default":
-                # Ensure we're using the correct schema
-                self.execute(f"USE {schema_name}")
+            # Use SHOW TABLES IN schema_name format for better reliability
+            if schema_name_str and schema_name_str != "default":
+                show_sql = f"SHOW TABLES IN {schema_name_str}"
+            else:
+                show_sql = "SHOW TABLES"
 
-            basic_sql = "SHOW TABLES"
-            basic_results = self.fetchall(basic_sql)
+            logger.debug(f"Executing metadata query: {show_sql}")
+            basic_results = self.fetchall(show_sql)
+            logger.debug(f"SHOW TABLES returned {len(basic_results)} rows")
 
             for row in basic_results:  # type: ignore
+                logger.debug(f"Processing SHOW TABLES row: {row}")
                 # Basic SHOW TABLES format: (database, tableName, isTemporary)
-                if len(row) >= 2:
-                    db_name = row[0] if row[0] else schema_name  # Empty string means current db
-                    table_name = row[1]
-                    is_temp = len(row) > 2 and row[2].lower() == "true"
+                # In Fabric Spark, sometimes it's just (tableName,) or (database, tableName)
+                if len(row) >= 1:
+                    if len(row) == 1:
+                        # Just table name
+                        db_name = schema_name_str
+                        table_name = row[0]
+                        is_temp = False
+                    elif len(row) == 2:
+                        # Database and table name
+                        db_name = row[0] if row[0] else schema_name_str
+                        table_name = row[1]
+                        is_temp = False
+                    else:
+                        # Full format with temp flag
+                        db_name = row[0] if row[0] else schema_name_str
+                        table_name = row[1]
+                        is_temp = len(row) > 2 and str(row[2]).lower() == "true"
 
                     # Skip temporary tables
                     if is_temp:
-                        continue
-
-                    # Only include tables from the requested schema
-                    if db_name != schema_name and row[0]:  # Skip if specific db and doesn't match
                         continue
 
                     if table_name:
@@ -630,15 +634,155 @@ class FabricSparkEngineAdapter(
                         if object_names is not None and table_name not in object_names:
                             continue
 
+                        # Check if this is a table created as a view replacement (has SQLMESH_VIEW comment)
+                        object_type = DataObjectType.TABLE
+                        try:
+                            # Try to get table comment to determine if it's a view replacement
+                            desc_sql = (
+                                f"DESCRIBE TABLE EXTENDED {db_name or schema_name_str}.{table_name}"
+                            )
+                            desc_results = self.fetchall(desc_sql)
+                            for desc_row in desc_results:
+                                if (
+                                    len(desc_row) >= 2
+                                    and str(desc_row[0]).lower() == "comment"
+                                    and "SQLMESH_VIEW" in str(desc_row[1])
+                                ):
+                                    object_type = DataObjectType.VIEW
+                                    break
+                        except Exception:
+                            pass  # Ignore errors getting table description
+
+                        logger.debug(
+                            f"Adding data object: catalog={catalog}, schema={db_name}, name={table_name}, type={object_type}"
+                        )
                         data_objects.append(
                             DataObject(
                                 catalog=catalog,
-                                schema=db_name or schema_name,
+                                schema=db_name or schema_name_str,
                                 name=table_name,
-                                type=DataObjectType.TABLE,  # Assume table for basic results
+                                type=object_type,
                             )
                         )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to get data objects for schema {schema_name_str}: {e}")
 
+        logger.debug(f"Returning {len(data_objects)} data objects")
         return data_objects
+
+    def create_view(
+        self,
+        view_name: "TableName",
+        query_or_df: "QueryOrDF",
+        columns_to_types: t.Optional[t.Dict[str, exp.DataType]] = None,
+        replace: bool = True,
+        materialized: bool = False,
+        materialized_properties: t.Optional[t.Dict[str, t.Any]] = None,
+        table_description: t.Optional[str] = None,
+        column_descriptions: t.Optional[t.Dict[str, str]] = None,
+        view_properties: t.Optional[t.Dict[str, exp.Expression]] = None,
+        **create_kwargs: t.Any,
+    ) -> None:
+        """Create a materialized lake view instead of a regular view for Fabric Spark."""
+
+        # Fabric Spark doesn't support regular views, only materialized lake views
+        # Convert all view creation to materialized lake view creation
+        logger.info(f"Creating materialized lake view {view_name} instead of regular view")
+
+        # Import here to avoid circular imports
+        import pandas as pd
+
+        if materialized_properties and not materialized:
+            from sqlmesh.utils.errors import SQLMeshError
+
+            raise SQLMeshError("Materialized properties are only supported for materialized views")
+
+        query_or_df = self._native_df_to_pandas_df(query_or_df)
+
+        if isinstance(query_or_df, pd.DataFrame):
+            values: t.List[t.Tuple[t.Any, ...]] = list(
+                query_or_df.itertuples(index=False, name=None)
+            )
+            columns_to_types = columns_to_types or self._columns_to_types(query_or_df)
+            if not columns_to_types:
+                from sqlmesh.utils.errors import SQLMeshError
+
+                raise SQLMeshError("columns_to_types must be provided for dataframes")
+            query_or_df = self._values_to_sql(
+                values,
+                columns_to_types,
+                batch_start=0,
+                batch_end=len(values),
+            )
+
+        source_queries, columns_to_types = self._get_source_queries_and_columns_to_types(
+            query_or_df, columns_to_types, batch_size=0, target_table=view_name
+        )
+        if len(source_queries) != 1:
+            from sqlmesh.utils.errors import SQLMeshError
+
+            raise SQLMeshError("Only one source query is supported for creating views")
+
+        schema: t.Union[exp.Table, exp.Schema] = exp.to_table(view_name)
+        if columns_to_types:
+            schema = self._build_schema_exp(
+                exp.to_table(view_name), columns_to_types, column_descriptions, is_view=True
+            )
+
+        properties = create_kwargs.pop("properties", None)
+        if not properties:
+            properties = exp.Properties(expressions=[])
+
+        # Force materialized lake view for Fabric Spark
+        properties.append("expressions", exp.MaterializedProperty())
+
+        # Add lake view type property - this is specific to Fabric Spark
+        properties.append(
+            "expressions", exp.Property(this="TYPE", value=exp.Literal.string("LAKEHOUSE"))
+        )
+
+        if view_properties:
+            table_type = self._pop_creatable_type_from_properties(view_properties)
+            if table_type:
+                properties.append("expressions", table_type)
+
+        if not self.SUPPORTS_VIEW_SCHEMA and isinstance(schema, exp.Schema):
+            schema = schema.this
+
+        create_view_properties = self._build_view_properties_exp(
+            view_properties,
+            (
+                table_description
+                if self.COMMENT_CREATION_VIEW.supports_schema_def and self.comments_enabled
+                else None
+            ),
+            physical_cluster=create_kwargs.pop("physical_cluster", None),
+        )
+        if create_view_properties:
+            for view_property in create_view_properties.expressions:
+                properties.append("expressions", view_property)
+
+        if properties.expressions:
+            create_kwargs["properties"] = properties
+
+        with source_queries[0] as query:
+            # For Fabric Spark, create a managed table since views aren't supported
+            # We'll handle this specially in metadata discovery to report as views
+            table_name = exp.to_table(view_name).sql(dialect=self.dialect)
+
+            if replace:
+                # Drop existing table if it exists
+                try:
+                    self.execute(f"DROP TABLE IF EXISTS {table_name}")
+                except Exception:
+                    pass  # Ignore if doesn't exist
+
+            # Create managed table with comment that includes both the original description and our marker
+            comment_parts = []
+            if table_description:
+                comment_parts.append(table_description)
+            comment_parts.append("SQLMESH_VIEW")
+            comment = " | ".join(comment_parts)
+
+            create_sql = f"CREATE TABLE {table_name} USING DELTA COMMENT '{comment}' AS {query.sql(dialect=self.dialect)}"
+            self.execute(create_sql)

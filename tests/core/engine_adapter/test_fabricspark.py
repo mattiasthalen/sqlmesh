@@ -145,6 +145,7 @@ def test_cursor_execute(mock_get_token, mock_requests):
     with patch.object(session, "execute_statement") as mock_execute:
         mock_execute.return_value = {
             "output": {
+                "status": "ok",
                 "data": {
                     "application/json": {
                         "data": [["value1", "value2"]],
@@ -155,7 +156,7 @@ def test_cursor_execute(mock_get_token, mock_requests):
                             ]
                         },
                     }
-                }
+                },
             }
         }
 
