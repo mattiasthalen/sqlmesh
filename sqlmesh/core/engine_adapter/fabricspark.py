@@ -567,14 +567,116 @@ class FabricSparkEngineAdapter(
         if not results:
             return pd.DataFrame()
 
-        # Get column names from cursor description if available
+        # Get column names and types from cursor description if available
         if hasattr(self.cursor, "description") and self.cursor.description:
             columns = [desc[0] for desc in self.cursor.description]
+            column_types = (
+                [desc[1] for desc in self.cursor.description]
+                if len(self.cursor.description[0]) > 1
+                else None
+            )
         else:
             # Fallback: use generic column names
             columns = [f"col_{i}" for i in range(len(results[0]) if results else 0)]
+            column_types = None
 
-        return pd.DataFrame(results, columns=columns)
+        df = pd.DataFrame(results, columns=columns)
+
+        # Convert values to appropriate pandas types based on column types
+        if column_types and self.cursor.description:
+            for i, (col_name, col_type) in enumerate(zip(columns, column_types)):
+                col_type_str = str(col_type).upper() if col_type else ""
+
+                if col_type and col_type_str in ("TIMESTAMP", "DATETIME", "DATE"):
+                    # Convert None values to pd.NaT for timestamp/datetime columns
+                    df[col_name] = df[col_name].apply(lambda x: pd.NaT if x is None else x)
+                    # Handle specific data type conversions
+                    if col_type_str == "DATE":
+                        try:
+                            # Convert date strings to datetime.date objects
+                            def convert_date(x: t.Any) -> t.Any:
+                                if pd.isna(x) or x is pd.NaT:
+                                    return pd.NaT
+                                if isinstance(x, str):
+                                    # Parse date string to datetime.date
+                                    dt = pd.to_datetime(x, errors="coerce")
+                                    return dt.date() if not pd.isna(dt) else pd.NaT
+                                return x
+
+                            df[col_name] = df[col_name].apply(convert_date)
+                        except:
+                            pass  # Keep original values if conversion fails
+                    elif col_type_str in ("TIMESTAMP", "DATETIME"):
+                        try:
+                            converted = pd.to_datetime(df[col_name], errors="coerce")
+                            # Convert timezone-aware datetime to timezone-naive for compatibility
+                            if hasattr(converted.dtype, "tz") and converted.dtype.tz is not None:
+                                converted = converted.dt.tz_convert("UTC").dt.tz_localize(None)
+                            df[col_name] = converted
+                        except:
+                            pass  # Keep original values if conversion fails
+
+                elif col_type and col_type_str in ("BOOLEAN", "BOOL"):
+                    # Convert boolean values to string representation ("1", "0")
+                    try:
+
+                        def convert_boolean(x: t.Any) -> t.Any:
+                            if x is None:
+                                return None
+                            # Convert numeric boolean values to string
+                            if isinstance(x, (int, float)):
+                                return "1" if x else "0"
+                            # Convert actual boolean values to string
+                            if isinstance(x, bool):
+                                return "1" if x else "0"
+                            return x
+
+                        df[col_name] = df[col_name].apply(convert_boolean)
+                    except:
+                        pass  # Keep original values if conversion fails
+
+        # Fallback: Apply data type transformations based on data inspection when type info unavailable
+        for col_name in df.columns:
+            # Check if column contains boolean-like numeric values (0.0, 1.0) that should be strings
+            if not df[col_name].empty:
+                sample_values = df[col_name].dropna()
+                if len(sample_values) > 0:
+                    # Check if all non-null values are exactly 0 or 1 (as int or float)
+                    all_boolean_like = all(
+                        isinstance(v, (int, float)) and v in (0, 1, 0.0, 1.0) for v in sample_values
+                    )
+                    if all_boolean_like:
+                        # This looks like boolean data - convert to string representation
+                        def convert_to_string_bool(x: t.Any) -> t.Any:
+                            if x is None or pd.isna(x):
+                                return None
+                            return "1" if (x == 1 or x == 1.0) else "0"
+
+                        df[col_name] = df[col_name].apply(convert_to_string_bool)
+
+                elif col_type and col_type_str in (
+                    "INT",
+                    "INTEGER",
+                    "BIGINT",
+                    "SMALLINT",
+                    "TINYINT",
+                ):
+                    # Convert string integers to actual integers
+                    try:
+                        df[col_name] = pd.to_numeric(
+                            df[col_name], errors="coerce", downcast="integer"
+                        )
+                    except:
+                        pass  # Keep original values if conversion fails
+
+                elif col_type and col_type_str in ("FLOAT", "DOUBLE", "DECIMAL", "NUMERIC", "REAL"):
+                    # Convert string floats to actual floats
+                    try:
+                        df[col_name] = pd.to_numeric(df[col_name], errors="coerce")
+                    except:
+                        pass  # Keep original values if conversion fails
+
+        return df
 
     def _get_data_objects(
         self, schema_name: "SchemaName", object_names: t.Optional[t.Set[str]] = None
@@ -640,8 +742,15 @@ class FabricSparkEngineAdapter(
 
                             # Check if this table has the materialized lake view property
                             if "lakehouse_materialized_view" in full_description.lower():
-                                # Treat materialized lake views as regular views for SQLMesh compatibility
-                                object_type = DataObjectType.VIEW
+                                # Check the SQLMesh view type property to distinguish between views and materialized views
+                                if "sqlmesh.view.type" in full_description.lower():
+                                    if "materialized_view" in full_description.lower():
+                                        object_type = DataObjectType.MATERIALIZED_VIEW
+                                    else:
+                                        object_type = DataObjectType.VIEW
+                                else:
+                                    # Default to materialized view if no SQLMesh property found
+                                    object_type = DataObjectType.MATERIALIZED_VIEW
                         except Exception:
                             pass  # Ignore errors getting table description
 
@@ -770,9 +879,33 @@ class FabricSparkEngineAdapter(
 
             # Create materialized lake view using Fabric Spark syntax
             # Reference: https://learn.microsoft.com/en-us/fabric/data-engineering/materialized-lake-views/create-materialized-lake-view
+
+            # Add a property to distinguish between regular views and materialized views
+            view_type = "materialized_view" if materialized else "view"
             create_sql = (
                 f"CREATE OR REPLACE TABLE {view_name_sql} "
-                f"TBLPROPERTIES ('lakehouse.table.type' = 'lakehouse_materialized_view') "
-                f"AS {query.sql(dialect=self.dialect)}"
+                f"TBLPROPERTIES ("
+                f"'lakehouse.table.type' = 'lakehouse_materialized_view', "
+                f"'sqlmesh.view.type' = '{view_type}'"
+                f") AS {query.sql(dialect=self.dialect)}"
             )
             self.execute(create_sql)
+
+    def drop_view(
+        self,
+        view_name: "TableName",
+        ignore_if_not_exists: bool = True,
+        materialized: bool = False,
+        **kwargs: t.Any,
+    ) -> None:
+        """Drop a view or materialized view in Fabric Spark."""
+        # According to Microsoft docs, materialized lake views should be dropped using DROP VIEW
+        # Reference: https://learn.microsoft.com/en-us/fabric/data-engineering/materialized-lake-views/create-materialized-lake-view#drop-a-materialized-lake-view
+        view_name_sql = exp.to_table(view_name).sql(dialect=self.dialect)
+
+        exists_clause = "IF EXISTS" if ignore_if_not_exists else ""
+        # Fabric Spark doesn't support CASCADE in DROP VIEW
+
+        # Use the correct Fabric Spark syntax for dropping materialized lake views
+        drop_sql = f"DROP MATERIALIZED LAKE VIEW {exists_clause} {view_name_sql}".strip()
+        self.execute(drop_sql)

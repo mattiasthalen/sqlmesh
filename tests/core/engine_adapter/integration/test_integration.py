@@ -415,7 +415,9 @@ def test_replace_query(ctx_query_and_df: TestContext):
         # provided then it checks the table itself for types. This is fine within SQLMesh since we always know the tables
         # exist prior to evaluation but when running these tests that isn't the case. As a result we just pass in
         # columns_to_types for these two engines so we can still test inference on the other ones
-        columns_to_types=ctx.columns_to_types if ctx.dialect in ["spark", "databricks"] else None,
+        columns_to_types=ctx.columns_to_types
+        if ctx.dialect in ["spark", "databricks", "fabricspark"]
+        else None,
         table_format=ctx.default_table_format,
     )
     results = ctx.get_metadata_results()
@@ -438,7 +440,9 @@ def test_replace_query(ctx_query_and_df: TestContext):
             table,
             ctx.input_data(replace_data),
             columns_to_types=(
-                ctx.columns_to_types if ctx.dialect in ["spark", "databricks"] else None
+                ctx.columns_to_types
+                if ctx.dialect in ["spark", "databricks", "fabricspark"]
+                else None
             ),
             table_format=ctx.default_table_format,
         )
@@ -472,7 +476,9 @@ def test_replace_query_batched(ctx_query_and_df: TestContext):
         # provided then it checks the table itself for types. This is fine within SQLMesh since we always know the tables
         # exist prior to evaluation but when running these tests that isn't the case. As a result we just pass in
         # columns_to_types for these two engines so we can still test inference on the other ones
-        columns_to_types=ctx.columns_to_types if ctx.dialect in ["spark", "databricks"] else None,
+        columns_to_types=ctx.columns_to_types
+        if ctx.dialect in ["spark", "databricks", "fabricspark"]
+        else None,
         table_format=ctx.default_table_format,
     )
     results = ctx.get_metadata_results()
@@ -495,7 +501,9 @@ def test_replace_query_batched(ctx_query_and_df: TestContext):
             table,
             ctx.input_data(replace_data),
             columns_to_types=(
-                ctx.columns_to_types if ctx.dialect in ["spark", "databricks"] else None
+                ctx.columns_to_types
+                if ctx.dialect in ["spark", "databricks", "fabricspark"]
+                else None
             ),
             table_format=ctx.default_table_format,
         )
@@ -1492,7 +1500,7 @@ def test_sushi(ctx: TestContext, tmp_path_factory: pytest.TempPathFactory):
                 # MySQL and Spark pass through the column comments from the underlying table to the view
                 # so always have view comments present
                 if not (
-                    ctx.dialect in ("mysql", "spark", "databricks")
+                    ctx.dialect in ("mysql", "spark", "databricks", "fabricspark")
                     and layer_models[model_name]["is_view"]
                 ):
                     expected_col_comments = comments.get(model_name).get("column", None)
@@ -1734,6 +1742,7 @@ def test_dialects(ctx: TestContext):
                 "clickhouse": pd.NaT,
                 "databricks": pd.NaT,
                 "duckdb": pd.NaT,
+                "fabricspark": pd.NaT,
                 "motherduck": pd.NaT,
                 "snowflake": pd.NaT,
                 "spark": pd.NaT,
@@ -1759,6 +1768,7 @@ def test_dialects(ctx: TestContext):
                 "mysql": pd.Timestamp("2020-01-01 00:00:00"),
                 "spark": pd.Timestamp("2020-01-01 00:00:00"),
                 "databricks": pd.Timestamp("2020-01-01 00:00:00"),
+                "fabricspark": pd.Timestamp("2020-01-01 00:00:00"),
             },
         ),
         (
