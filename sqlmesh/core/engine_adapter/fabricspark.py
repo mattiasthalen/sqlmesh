@@ -543,13 +543,10 @@ class FabricSparkEngineAdapter(
 
     def get_current_catalog(self) -> t.Optional[str]:
         """Get the current catalog from the Fabric connection."""
-        # Fabric Spark uses lakehouse as catalog name
-        try:
-            result = self.fetchone("SELECT current_catalog()")
-            return result[0] if result else None  # type: ignore
-        except Exception:
-            # Fallback to lakehouse name from connection config
-            return self.connection.credentials.database
+        # In Fabric Spark, we want to use the lakehouse name as the catalog name
+        # instead of the generic 'spark_catalog' returned by current_catalog()
+        # The lakehouse name is stored in the database field of credentials
+        return self.connection.credentials.database
 
     def get_current_database(self) -> str:
         """Get the current database (schema) from Fabric Spark."""
@@ -617,18 +614,18 @@ class FabricSparkEngineAdapter(
                             pass  # Keep original values if conversion fails
 
                 elif col_type and col_type_str in ("BOOLEAN", "BOOL"):
-                    # Convert boolean values to string representation ("1", "0")
+                    # For boolean columns, keep them as numeric (0, 1) for table diff operations
+                    # Only convert to strings if explicitly needed for specific use cases
                     try:
 
                         def convert_boolean(x: t.Any) -> t.Any:
                             if x is None:
                                 return None
-                            # Convert numeric boolean values to string
+                            # Keep as numeric values for arithmetic operations
                             if isinstance(x, (int, float)):
-                                return "1" if x else "0"
-                            # Convert actual boolean values to string
+                                return 1 if x else 0
                             if isinstance(x, bool):
-                                return "1" if x else "0"
+                                return 1 if x else 0
                             return x
 
                         df[col_name] = df[col_name].apply(convert_boolean)
@@ -646,13 +643,13 @@ class FabricSparkEngineAdapter(
                         isinstance(v, (int, float)) and v in (0, 1, 0.0, 1.0) for v in sample_values
                     )
                     if all_boolean_like:
-                        # This looks like boolean data - convert to string representation
-                        def convert_to_string_bool(x: t.Any) -> t.Any:
+                        # This looks like boolean data - keep as numeric for arithmetic operations
+                        def convert_to_numeric_bool(x: t.Any) -> t.Any:
                             if x is None or pd.isna(x):
                                 return None
-                            return "1" if (x == 1 or x == 1.0) else "0"
+                            return 1 if (x == 1 or x == 1.0) else 0
 
-                        df[col_name] = df[col_name].apply(convert_to_string_bool)
+                        df[col_name] = df[col_name].apply(convert_to_numeric_bool)
 
                 elif col_type and col_type_str in (
                     "INT",
@@ -744,10 +741,20 @@ class FabricSparkEngineAdapter(
                             if "lakehouse_materialized_view" in full_description.lower():
                                 # Check the SQLMesh view type property to distinguish between views and materialized views
                                 if "sqlmesh.view.type" in full_description.lower():
-                                    if "materialized_view" in full_description.lower():
+                                    # More precise check for the view type value - handle different spacing and quote patterns
+                                    normalized_desc = (
+                                        full_description.lower()
+                                        .replace(" ", "")
+                                        .replace("'", "")
+                                        .replace('"', "")
+                                    )
+                                    if "sqlmesh.view.type=materialized_view" in normalized_desc:
                                         object_type = DataObjectType.MATERIALIZED_VIEW
-                                    else:
+                                    elif "sqlmesh.view.type=view" in normalized_desc:
                                         object_type = DataObjectType.VIEW
+                                    else:
+                                        # If we have the property but can't parse it, default to materialized view
+                                        object_type = DataObjectType.MATERIALIZED_VIEW
                                 else:
                                     # Default to materialized view if no SQLMesh property found
                                     object_type = DataObjectType.MATERIALIZED_VIEW
@@ -906,6 +913,7 @@ class FabricSparkEngineAdapter(
         exists_clause = "IF EXISTS" if ignore_if_not_exists else ""
         # Fabric Spark doesn't support CASCADE in DROP VIEW
 
-        # Use the correct Fabric Spark syntax for dropping materialized lake views
-        drop_sql = f"DROP MATERIALIZED LAKE VIEW {exists_clause} {view_name_sql}".strip()
+        # In Fabric Spark, materialized lake views are stored as tables with special properties
+        # So we need to drop them as tables, not as views
+        drop_sql = f"DROP TABLE {exists_clause} {view_name_sql}".strip()
         self.execute(drop_sql)

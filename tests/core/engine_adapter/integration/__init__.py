@@ -278,9 +278,12 @@ class TestContext:
     @property
     def supports_merge(self) -> bool:
         if self.dialect == "spark":
-            assert isinstance(self.engine_adapter, SparkEngineAdapter)
-            # Spark supports MERGE on the Iceberg catalog (which is configured under "testing" in these integration tests)
-            return self.engine_adapter.default_catalog == "testing"
+            # Handle both regular Spark and FabricSpark adapters
+            if isinstance(self.engine_adapter, SparkEngineAdapter):
+                # Spark supports MERGE on the Iceberg catalog (which is configured under "testing" in these integration tests)
+                return self.engine_adapter.default_catalog == "testing"
+            # FabricSpark and other spark-based adapters support merge operations
+            return True
 
         if self.dialect == "trino":
             assert isinstance(self.engine_adapter, TrinoEngineAdapter)

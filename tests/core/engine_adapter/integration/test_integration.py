@@ -1783,6 +1783,7 @@ def test_dialects(ctx: TestContext):
             "%Y-%m-%dT%H:%M:%S%z",
             {
                 "default": "2020-01-01T00:00:00+0000",
+                "fabricspark": "2020-01-01T00:00:00+00:00",
             },
         ),
         (

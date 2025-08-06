@@ -49,14 +49,12 @@ def test_get_current_catalog(mocker: MockerFixture, adapter: FabricSparkEngineAd
 
 def test_get_current_catalog_fallback(mocker: MockerFixture, adapter: FabricSparkEngineAdapter):
     """Test getting current catalog with fallback."""
-    fetchone_mock = mocker.patch.object(
-        adapter, "fetchone", side_effect=Exception("No current_catalog")
-    )
-
+    # In the new implementation, it directly returns database from credentials
+    # without trying fetchone, so no mocking needed
     result = adapter.get_current_catalog()
 
-    # Should fallback to spark_catalog
-    assert result == "spark_catalog"
+    # Should return the database name from connection credentials
+    assert result == adapter.connection.credentials.database
 
 
 def test_set_current_catalog_not_supported(adapter: FabricSparkEngineAdapter):
