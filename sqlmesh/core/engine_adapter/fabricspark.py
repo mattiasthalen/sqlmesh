@@ -709,12 +709,42 @@ class FabricSparkEngineAdapter(
                         is_temp = False
                     elif len(row) == 2:
                         # Database and table name
-                        db_name = row[0] if row[0] else schema_name_str
+                        raw_db_name = row[0] if row[0] else schema_name_str
+                        # Extract just the schema name from fully qualified database name
+                        # FabricSpark may return "`catalog`.database.schema" but we only want "schema"
+                        if raw_db_name and "." in raw_db_name:
+                            # Parse the fully qualified name and extract just the last component (schema)
+                            try:
+                                parsed_table = exp.to_table(raw_db_name, dialect=self.dialect)
+                                # If this parses as a 3-part identifier, the schema is the name part
+                                # If it's a 2-part identifier, the schema is also the name part
+                                db_name = parsed_table.name if parsed_table.name else raw_db_name
+                            except Exception:
+                                # Fallback: split on dots and take the last part
+                                parts = raw_db_name.replace("`", "").split(".")
+                                db_name = parts[-1] if parts else raw_db_name
+                        else:
+                            db_name = raw_db_name
                         table_name = row[1]
                         is_temp = False
                     else:
                         # Full format with temp flag
-                        db_name = row[0] if row[0] else schema_name_str
+                        raw_db_name = row[0] if row[0] else schema_name_str
+                        # Extract just the schema name from fully qualified database name
+                        # FabricSpark may return "`catalog`.database.schema" but we only want "schema"
+                        if raw_db_name and "." in raw_db_name:
+                            # Parse the fully qualified name and extract just the last component (schema)
+                            try:
+                                parsed_table = exp.to_table(raw_db_name, dialect=self.dialect)
+                                # If this parses as a 3-part identifier, the schema is the name part
+                                # If it's a 2-part identifier, the schema is also the name part
+                                db_name = parsed_table.name if parsed_table.name else raw_db_name
+                            except Exception:
+                                # Fallback: split on dots and take the last part
+                                parts = raw_db_name.replace("`", "").split(".")
+                                db_name = parts[-1] if parts else raw_db_name
+                        else:
+                            db_name = raw_db_name
                         table_name = row[1]
                         is_temp = len(row) > 2 and str(row[2]).lower() == "true"
 
