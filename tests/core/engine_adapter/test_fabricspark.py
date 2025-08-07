@@ -1,15 +1,16 @@
 # type: ignore
 import typing as t
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 from pytest_mock.plugin import MockerFixture
 from sqlglot import exp
 
-from sqlmesh.core.engine_adapter.fabricspark import FabricSparkEngineAdapter
+from sqlmesh.core.engine_adapter.fabricspark import FabricSparkEngineAdapter, FabricSparkCursor
 from sqlmesh.core.config.connection import FabricSparkConnectionConfig, parse_connection_config
 from sqlmesh.utils.date import to_time_column
 from sqlmesh.utils.errors import ConfigError
+from sqlmesh.core.table_diff import SQLMESH_SAMPLE_TYPE_COL
 
 pytestmark = [pytest.mark.fabricspark, pytest.mark.engine]
 
@@ -597,3 +598,62 @@ def test_to_time_column_timezone_formatting():
         assert other_result.this == result.this, (
             f"FabricSpark should format timezone same as {other_dialect}"
         )
+
+
+def test_cursor_fetchdf_preserves_all_columns():
+    """Test that the cursor's fetchdf method preserves all columns including __sqlmesh_sample_type."""
+
+    # Create a mock livy session
+    livy_session = MagicMock()
+    cursor = FabricSparkCursor(livy_session)
+
+    # Mock the last result to include the sample type column
+    sample_data = [
+        ("common_rows", 1, "value1"),
+        ("source_only", 2, "value2"),
+        ("target_only", 3, "value3"),
+    ]
+    cursor._last_output = sample_data
+
+    # Mock the description to include the sample type column
+    cursor.description = [
+        (SQLMESH_SAMPLE_TYPE_COL, "string", None, None, None, None, True),
+        ("id", "int", None, None, None, None, True),
+        ("data", "string", None, None, None, None, True),
+    ]
+
+    # Call fetchdf
+    df = cursor.fetchdf()
+
+    # Verify all columns are preserved
+    expected_columns = [SQLMESH_SAMPLE_TYPE_COL, "id", "data"]
+    assert list(df.columns) == expected_columns, (
+        f"Expected {expected_columns}, got {list(df.columns)}"
+    )
+
+    # Verify the sample type column contains the expected values
+    assert SQLMESH_SAMPLE_TYPE_COL in df.columns, f"Column {SQLMESH_SAMPLE_TYPE_COL} is missing"
+    assert set(df[SQLMESH_SAMPLE_TYPE_COL]) == {"common_rows", "source_only", "target_only"}
+
+    # Verify other columns are present
+    assert set(df["id"]) == {1, 2, 3}
+    assert set(df["data"]) == {"value1", "value2", "value3"}
+
+
+def test_cursor_fetchdf_empty_result():
+    """Test that the cursor's fetchdf method handles empty results correctly."""
+
+    # Create a mock livy session
+    livy_session = MagicMock()
+    cursor = FabricSparkCursor(livy_session)
+
+    # Mock empty result
+    cursor._last_output = None
+    cursor.description = None
+
+    # Call fetchdf
+    df = cursor.fetchdf()
+
+    # Should return empty DataFrame
+    assert df.empty
+    assert len(df.columns) == 0

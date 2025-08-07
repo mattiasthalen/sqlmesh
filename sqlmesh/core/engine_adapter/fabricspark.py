@@ -434,6 +434,131 @@ class FabricSparkCursor:
 
         return output
 
+    def fetchdf(self) -> "pd.DataFrame":
+        """Fetch a Pandas DataFrame from the last executed query."""
+        import pandas as pd
+
+        if self._last_output is None:
+            return pd.DataFrame()
+
+        # Get column names and types from cursor description if available
+        if self.description:
+            columns = [desc[0] for desc in self.description]
+            column_types = [desc[1] for desc in self.description]
+        else:
+            # Fallback: use generic column names
+            columns = [
+                f"col_{i}" for i in range(len(self._last_output[0]) if self._last_output else 0)
+            ]
+            column_types = None
+
+        df = pd.DataFrame(self._last_output, columns=columns)
+
+        # Convert values to appropriate pandas types based on column types
+        if column_types and self.description:
+            for i, (col_name, col_type) in enumerate(zip(columns, column_types)):
+                col_type_str = str(col_type).upper() if col_type else ""
+
+                if col_type and col_type_str in ("TIMESTAMP", "DATETIME", "DATE"):
+                    # Convert None values to pd.NaT for timestamp/datetime columns
+                    df[col_name] = df[col_name].apply(lambda x: pd.NaT if x is None else x)  # type: ignore
+                    # Handle specific data type conversions
+                    if col_type_str == "DATE":
+                        try:
+                            # Convert date strings to datetime.date objects
+                            def convert_date(x: t.Any) -> t.Any:
+                                if pd.isna(x) or x is pd.NaT:
+                                    return pd.NaT
+                                if isinstance(x, str):
+                                    # Parse date string to datetime.date
+                                    dt = pd.to_datetime(x, errors="coerce")
+                                    if not pd.isna(dt):
+                                        return dt.date() if hasattr(dt, "date") else dt
+                                    return pd.NaT
+                                return x
+
+                            df[col_name] = df[col_name].apply(convert_date)  # type: ignore
+                        except:
+                            pass  # Keep original values if conversion fails
+                    elif col_type_str in ("TIMESTAMP", "DATETIME"):
+                        try:
+                            converted = pd.to_datetime(df[col_name], errors="coerce")
+                            # Convert timezone-aware datetime to timezone-naive for compatibility
+                            if hasattr(converted.dtype, "tz") and converted.dtype.tz is not None:
+                                converted = converted.dt.tz_convert("UTC").dt.tz_localize(None)
+                            df[col_name] = converted
+                        except:
+                            pass  # Keep original values if conversion fails
+
+                elif col_type and col_type_str in ("BOOLEAN", "BOOL"):
+                    # For boolean columns, keep them as numeric (0, 1) for table diff operations
+                    # Only convert to strings if explicitly needed for specific use cases
+                    try:
+
+                        def convert_boolean(x: t.Any) -> t.Any:
+                            if x is None:
+                                return None
+                            # Keep as numeric values for arithmetic operations
+                            if isinstance(x, (int, float)):
+                                return 1 if x else 0
+                            if isinstance(x, bool):
+                                return 1 if x else 0
+                            return x
+
+                        df[col_name] = df[col_name].apply(convert_boolean)
+                    except:
+                        pass  # Keep original values if conversion fails
+
+        # Fallback: Apply data type transformations based on data inspection when type info unavailable
+        for i, col_name in enumerate(df.columns):
+            # First try column type information if available
+            if column_types and i < len(column_types):
+                col_type = column_types[i]
+                col_type_str = str(col_type).upper() if col_type else ""
+
+                if col_type_str in (
+                    "INT",
+                    "INTEGER",
+                    "BIGINT",
+                    "SMALLINT",
+                    "TINYINT",
+                ):
+                    # Convert string integers to actual integers
+                    try:
+                        df[col_name] = pd.to_numeric(
+                            df[col_name], errors="coerce", downcast="integer"
+                        )
+                        continue
+                    except:
+                        pass  # Keep original values if conversion fails
+
+                elif col_type_str in ("FLOAT", "DOUBLE", "DECIMAL", "NUMERIC", "REAL"):
+                    # Convert string floats to actual floats
+                    try:
+                        df[col_name] = pd.to_numeric(df[col_name], errors="coerce")
+                        continue
+                    except:
+                        pass  # Keep original values if conversion fails
+
+            # Check if column contains boolean-like numeric values (0.0, 1.0) based on data
+            if not df[col_name].empty:
+                sample_values = df[col_name].dropna()
+                if len(sample_values) > 0:
+                    # Check if all non-null values are exactly 0 or 1 (as int or float)
+                    all_boolean_like = all(
+                        isinstance(v, (int, float)) and v in (0, 1, 0.0, 1.0) for v in sample_values
+                    )
+                    if all_boolean_like:
+                        # This looks like boolean data - keep as numeric for arithmetic operations
+                        def convert_to_numeric_bool(x: t.Any) -> t.Any:
+                            if x is None or pd.isna(x):
+                                return None
+                            return 1 if (x == 1 or x == 1.0) else 0
+
+                        df[col_name] = df[col_name].apply(convert_to_numeric_bool)
+
+        return df
+
     def close(self) -> None:
         """Close the cursor."""
         pass
@@ -571,127 +696,6 @@ class FabricSparkEngineAdapter(
         # Fabric uses lakehouse concepts, but Spark SQL still has database/schema
         result = self.fetchone("SELECT current_database()")
         return result[0] if result else "default"  # type: ignore
-
-    def fetchdf(
-        self, query: t.Union[exp.Expression, str], quote_identifiers: bool = False
-    ) -> "pd.DataFrame":
-        """Fetch a Pandas DataFrame from a query."""
-        import pandas as pd
-
-        results = self.fetchall(query, quote_identifiers=quote_identifiers)
-        if not results:
-            return pd.DataFrame()
-
-        # Get column names and types from cursor description if available
-        if hasattr(self.cursor, "description") and self.cursor.description:
-            columns = [desc[0] for desc in self.cursor.description]
-            column_types = (
-                [desc[1] for desc in self.cursor.description]
-                if len(self.cursor.description[0]) > 1
-                else None
-            )
-        else:
-            # Fallback: use generic column names
-            columns = [f"col_{i}" for i in range(len(results[0]) if results else 0)]
-            column_types = None
-
-        df = pd.DataFrame(results, columns=columns)
-
-        # Convert values to appropriate pandas types based on column types
-        if column_types and self.cursor.description:
-            for i, (col_name, col_type) in enumerate(zip(columns, column_types)):
-                col_type_str = str(col_type).upper() if col_type else ""
-
-                if col_type and col_type_str in ("TIMESTAMP", "DATETIME", "DATE"):
-                    # Convert None values to pd.NaT for timestamp/datetime columns
-                    df[col_name] = df[col_name].apply(lambda x: pd.NaT if x is None else x)
-                    # Handle specific data type conversions
-                    if col_type_str == "DATE":
-                        try:
-                            # Convert date strings to datetime.date objects
-                            def convert_date(x: t.Any) -> t.Any:
-                                if pd.isna(x) or x is pd.NaT:
-                                    return pd.NaT
-                                if isinstance(x, str):
-                                    # Parse date string to datetime.date
-                                    dt = pd.to_datetime(x, errors="coerce")
-                                    return dt.date() if not pd.isna(dt) else pd.NaT
-                                return x
-
-                            df[col_name] = df[col_name].apply(convert_date)
-                        except:
-                            pass  # Keep original values if conversion fails
-                    elif col_type_str in ("TIMESTAMP", "DATETIME"):
-                        try:
-                            converted = pd.to_datetime(df[col_name], errors="coerce")
-                            # Convert timezone-aware datetime to timezone-naive for compatibility
-                            if hasattr(converted.dtype, "tz") and converted.dtype.tz is not None:
-                                converted = converted.dt.tz_convert("UTC").dt.tz_localize(None)
-                            df[col_name] = converted
-                        except:
-                            pass  # Keep original values if conversion fails
-
-                elif col_type and col_type_str in ("BOOLEAN", "BOOL"):
-                    # For boolean columns, keep them as numeric (0, 1) for table diff operations
-                    # Only convert to strings if explicitly needed for specific use cases
-                    try:
-
-                        def convert_boolean(x: t.Any) -> t.Any:
-                            if x is None:
-                                return None
-                            # Keep as numeric values for arithmetic operations
-                            if isinstance(x, (int, float)):
-                                return 1 if x else 0
-                            if isinstance(x, bool):
-                                return 1 if x else 0
-                            return x
-
-                        df[col_name] = df[col_name].apply(convert_boolean)
-                    except:
-                        pass  # Keep original values if conversion fails
-
-        # Fallback: Apply data type transformations based on data inspection when type info unavailable
-        for col_name in df.columns:
-            # Check if column contains boolean-like numeric values (0.0, 1.0) that should be strings
-            if not df[col_name].empty:
-                sample_values = df[col_name].dropna()
-                if len(sample_values) > 0:
-                    # Check if all non-null values are exactly 0 or 1 (as int or float)
-                    all_boolean_like = all(
-                        isinstance(v, (int, float)) and v in (0, 1, 0.0, 1.0) for v in sample_values
-                    )
-                    if all_boolean_like:
-                        # This looks like boolean data - keep as numeric for arithmetic operations
-                        def convert_to_numeric_bool(x: t.Any) -> t.Any:
-                            if x is None or pd.isna(x):
-                                return None
-                            return 1 if (x == 1 or x == 1.0) else 0
-
-                        df[col_name] = df[col_name].apply(convert_to_numeric_bool)
-
-                elif col_type and col_type_str in (
-                    "INT",
-                    "INTEGER",
-                    "BIGINT",
-                    "SMALLINT",
-                    "TINYINT",
-                ):
-                    # Convert string integers to actual integers
-                    try:
-                        df[col_name] = pd.to_numeric(
-                            df[col_name], errors="coerce", downcast="integer"
-                        )
-                    except:
-                        pass  # Keep original values if conversion fails
-
-                elif col_type and col_type_str in ("FLOAT", "DOUBLE", "DECIMAL", "NUMERIC", "REAL"):
-                    # Convert string floats to actual floats
-                    try:
-                        df[col_name] = pd.to_numeric(df[col_name], errors="coerce")
-                    except:
-                        pass  # Keep original values if conversion fails
-
-        return df
 
     def _get_data_objects(
         self, schema_name: "SchemaName", object_names: t.Optional[t.Set[str]] = None
