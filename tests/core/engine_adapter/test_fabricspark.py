@@ -513,3 +513,57 @@ def test_insert_overwrite_by_time_partition_integration_scenario(
     # The key insight: With DELETE_INSERT strategy, data outside the time range is preserved
     # This is exactly what the integration test expects - that id=2,ds=2022-01-02 survives
     # the second operation because 2022-01-02 is outside the 2022-01-03 to 2022-01-05 range
+
+
+def test_normalize_boolean_value(adapter: FabricSparkEngineAdapter):
+    """Test that boolean normalization returns CASE expression for string conversion."""
+    from sqlglot import exp
+
+    # Create a test column expression
+    test_column = exp.column("test_bool_column")
+
+    # Call the normalize_boolean_value method
+    result = adapter._normalize_boolean_value(test_column)
+
+    # Verify it returns a CASE expression
+    assert isinstance(result, exp.Case), f"Expected Case expression, got {type(result)}"
+
+    # Verify the SQL output is correct
+    expected_sql = "CASE WHEN test_bool_column THEN '1' ELSE '0' END"
+    actual_sql = result.sql(dialect="spark")
+    assert actual_sql == expected_sql, f"Expected SQL: {expected_sql}, got: {actual_sql}"
+
+    # Test with a different column name
+    another_column = exp.column("bool_field")
+    result2 = adapter._normalize_boolean_value(another_column)
+    expected_sql2 = "CASE WHEN bool_field THEN '1' ELSE '0' END"
+    actual_sql2 = result2.sql(dialect="spark")
+    assert actual_sql2 == expected_sql2, f"Expected SQL: {expected_sql2}, got: {actual_sql2}"
+
+
+def test_normalize_boolean_value_integration_with_normalize_value(
+    adapter: FabricSparkEngineAdapter,
+):
+    """Test that boolean normalization works correctly within the full normalize_value method."""
+    from sqlglot import exp
+
+    # Create a test column expression and boolean data type
+    test_column = exp.column("my_bool")
+    boolean_type = exp.DataType.build("BOOLEAN")
+
+    # Call the full normalize_value method
+    result = adapter.normalize_value(test_column, boolean_type)
+
+    # The result should be a CAST of the CASE expression to VARCHAR
+    assert isinstance(result, exp.Cast), f"Expected Cast expression, got {type(result)}"
+
+    # The inner expression should be our CASE expression
+    inner_expr = result.this
+    assert isinstance(inner_expr, exp.Case), (
+        f"Expected inner Case expression, got {type(inner_expr)}"
+    )
+
+    # Verify the complete SQL output (Spark SQL uses STRING instead of VARCHAR)
+    expected_sql = "CAST(CASE WHEN my_bool THEN '1' ELSE '0' END AS STRING)"
+    actual_sql = result.sql(dialect="spark")
+    assert actual_sql == expected_sql, f"Expected SQL: {expected_sql}, got: {actual_sql}"

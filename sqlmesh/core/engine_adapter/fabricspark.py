@@ -974,3 +974,19 @@ class FabricSparkEngineAdapter(
             insert_overwrite_strategy_override=InsertOverwriteStrategy.DELETE_INSERT,
             **kwargs,
         )
+
+    def _normalize_boolean_value(self, expr: exp.Expression) -> exp.Expression:
+        """
+        Normalize boolean values for FabricSpark.
+
+        FabricSpark returns boolean values as floats (1.0/0.0) when cast to INT,
+        which when converted to VARCHAR becomes "1.0"/"0.0" instead of "1"/"0".
+
+        Use a CASE expression to directly convert boolean to string "1" or "0".
+        """
+        return exp.Case(
+            ifs=[
+                exp.If(this=expr, true=exp.Literal.string("1")),
+            ],
+            default=exp.Literal.string("0"),
+        )
