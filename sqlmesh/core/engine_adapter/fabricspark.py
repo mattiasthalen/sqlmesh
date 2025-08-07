@@ -20,6 +20,7 @@ from sqlmesh.core.engine_adapter.shared import (
     DataObject,
     DataObjectType,
     InsertOverwriteStrategy,
+    SourceQuery,
     set_catalog,
     to_schema,
 )
@@ -917,3 +918,29 @@ class FabricSparkEngineAdapter(
         # So we need to drop them as tables, not as views
         drop_sql = f"DROP TABLE {exists_clause} {view_name_sql}".strip()
         self.execute(drop_sql)
+
+    def _insert_overwrite_by_time_partition(
+        self,
+        table_name: TableName,
+        source_queries: t.List[SourceQuery],
+        columns_to_types: t.Dict[str, exp.DataType],
+        where: exp.Condition,
+        **kwargs: t.Any,
+    ) -> None:
+        """
+        Override time partition overwrite to use DELETE_INSERT strategy.
+
+        FabricSpark's INSERT_OVERWRITE strategy replaces the entire table,
+        but for time-partitioned operations we need to replace only the
+        specified time range. This method uses DELETE + INSERT approach
+        to achieve the correct behavior.
+        """
+        # Force DELETE_INSERT strategy for time-partitioned overwrites
+        return self._insert_overwrite_by_condition(
+            table_name,
+            source_queries,
+            columns_to_types,
+            where,
+            insert_overwrite_strategy_override=InsertOverwriteStrategy.DELETE_INSERT,
+            **kwargs,
+        )

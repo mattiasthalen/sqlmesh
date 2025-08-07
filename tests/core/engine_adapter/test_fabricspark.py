@@ -281,3 +281,235 @@ class TestFabricSparkConnectionConfig:
         )
 
         assert config._engine_adapter == FabricSparkEngineAdapter
+
+
+def test_insert_overwrite_by_time_partition_behavior(
+    adapter: FabricSparkEngineAdapter, mocker: MockerFixture
+):
+    """Test insert_overwrite_by_time_partition behavior to reproduce the reported issue."""
+    import pandas as pd
+    from sqlglot import exp
+
+    table_name = "test_table"
+
+    # Mock fetchone to return table metadata
+    mocker.patch.object(adapter, "fetchone", return_value=("test_database",))
+
+    # Mock columns method to return table schema
+    columns_to_types = {"id": exp.DataType.build("int"), "ds": exp.DataType.build("string")}
+    mocker.patch.object(adapter, "columns", return_value=columns_to_types)
+
+    # Mock fetchall to simulate table contents at different stages
+    fetchall_results = []
+
+    def mock_fetchall(*args, **kwargs):
+        # Return the next result in sequence
+        if fetchall_results:
+            return fetchall_results.pop(0)
+        return []
+
+    mocker.patch.object(adapter, "fetchall", side_effect=mock_fetchall)
+
+    # Mock execute to capture SQL statements
+    executed_statements = []
+
+    def mock_execute(sql, *args, **kwargs):
+        executed_statements.append(str(sql))
+
+    mocker.patch.object(adapter, "execute", side_effect=mock_execute)
+
+    # Test data setup - simulate the test scenario
+    initial_data = pd.DataFrame(
+        [
+            {"id": 1, "ds": "2022-01-01"},
+            {"id": 2, "ds": "2022-01-02"},
+            {"id": 3, "ds": "2022-01-03"},
+        ]
+    )
+
+    # First operation: insert_overwrite_by_time_partition with start="2022-01-02", end="2022-01-03"
+    # This should keep data where ds NOT IN ('2022-01-02', '2022-01-03') and then add back [2,3] for [2022-01-02,2022-01-03]
+    adapter.insert_overwrite_by_time_partition(
+        table_name,
+        initial_data,
+        start="2022-01-02",
+        end="2022-01-03",
+        time_formatter=lambda x, _: exp.Literal.string(x),
+        time_column="ds",
+        columns_to_types=columns_to_types,
+    )
+
+    print("First operation executed statements:")
+    for stmt in executed_statements:
+        print(f"  {stmt}")
+
+    # Second operation data
+    overwrite_data = pd.DataFrame(
+        [
+            {"id": 10, "ds": "2022-01-03"},
+            {"id": 4, "ds": "2022-01-04"},
+            {"id": 5, "ds": "2022-01-05"},
+        ]
+    )
+
+    executed_statements.clear()
+
+    # Second operation: insert_overwrite_by_time_partition with start="2022-01-03", end="2022-01-05"
+    # This should keep data where ds NOT IN ('2022-01-03', '2022-01-04', '2022-01-05') and add [10,4,5] for [2022-01-03,2022-01-04,2022-01-05]
+    # Final expected result: id=2,ds=2022-01-02 (from before range) + [10,4,5] for [2022-01-03,2022-01-04,2022-01-05]
+    adapter.insert_overwrite_by_time_partition(
+        table_name,
+        overwrite_data,
+        start="2022-01-03",
+        end="2022-01-05",
+        time_formatter=lambda x, _: exp.Literal.string(x),
+        time_column="ds",
+        columns_to_types=columns_to_types,
+    )
+
+    print("Second operation executed statements:")
+    for stmt in executed_statements:
+        print(f"  {stmt}")
+
+    # With the fix, we should see DELETE + INSERT statements instead of INSERT OVERWRITE
+    # First operation should have 2 statements: DELETE ... WHERE ds BETWEEN ... and INSERT ...
+    # Second operation should have 2 statements: DELETE ... WHERE ds BETWEEN ... and INSERT ...
+
+    # Verify that DELETE statements are present (indicating DELETE_INSERT strategy is being used)
+    delete_statements = [
+        stmt for stmt in executed_statements if stmt.strip().upper().startswith("DELETE")
+    ]
+    insert_statements = [
+        stmt for stmt in executed_statements if stmt.strip().upper().startswith("INSERT")
+    ]
+
+    assert len(delete_statements) > 0, f"Expected DELETE statements but got: {executed_statements}"
+    assert len(insert_statements) > 0, f"Expected INSERT statements but got: {executed_statements}"
+
+    # The DELETE should target the specific time range
+    delete_stmt = delete_statements[0]
+    assert "WHERE ds BETWEEN" in delete_stmt or 'WHERE "ds" BETWEEN' in delete_stmt, (
+        f"DELETE statement should have time range condition: {delete_stmt}"
+    )
+
+    # The INSERT should not be INSERT OVERWRITE (which would replace entire table)
+    insert_stmt = insert_statements[0]
+    assert "INSERT OVERWRITE" not in insert_stmt, (
+        f"Should use INSERT not INSERT OVERWRITE: {insert_stmt}"
+    )
+
+
+def test_insert_overwrite_by_time_partition_integration_scenario(
+    adapter: FabricSparkEngineAdapter, mocker: MockerFixture
+):
+    """Test the full integration scenario that was failing in the original test."""
+    import pandas as pd
+    from sqlglot import exp
+
+    table_name = "test_table"
+
+    # Mock the necessary adapter methods
+    mocker.patch.object(adapter, "fetchone", return_value=("test_database",))
+
+    columns_to_types = {"id": exp.DataType.build("int"), "ds": exp.DataType.build("string")}
+    mocker.patch.object(adapter, "columns", return_value=columns_to_types)
+
+    # Track all executed statements
+    executed_statements = []
+
+    def mock_execute(sql, *args, **kwargs):
+        executed_statements.append(str(sql))
+
+    mocker.patch.object(adapter, "execute", side_effect=mock_execute)
+
+    # Simulate the exact integration test scenario
+
+    # Step 1: Initial data insert (ids 1,2,3 for dates 2022-01-01,02,03)
+    initial_data = pd.DataFrame(
+        [
+            {"id": 1, "ds": "2022-01-01"},
+            {"id": 2, "ds": "2022-01-02"},
+            {"id": 3, "ds": "2022-01-03"},
+        ]
+    )
+
+    # First overwrite: start="2022-01-02", end="2022-01-03"
+    # Should delete data for 2022-01-02 and 2022-01-03, then insert ids [2,3] back
+    # Expected remaining after first op: all initial data (since we're inserting the same data back)
+    adapter.insert_overwrite_by_time_partition(
+        table_name,
+        initial_data,
+        start="2022-01-02",
+        end="2022-01-03",
+        time_formatter=lambda x, _: exp.Literal.string(x),
+        time_column="ds",
+        columns_to_types=columns_to_types,
+    )
+
+    # Should have DELETE and INSERT statements
+    first_op_statements = executed_statements.copy()
+    executed_statements.clear()
+
+    assert len(first_op_statements) == 2, (
+        f"Expected 2 statements (DELETE + INSERT), got {len(first_op_statements)}"
+    )
+    assert first_op_statements[0].strip().upper().startswith("DELETE"), (
+        f"First should be DELETE: {first_op_statements[0]}"
+    )
+    assert first_op_statements[1].strip().upper().startswith("INSERT"), (
+        f"Second should be INSERT: {first_op_statements[1]}"
+    )
+
+    # Step 2: Second overwrite with new data
+    # New data: ids [10,4,5] for dates [2022-01-03,04,05]
+    # Range: start="2022-01-03", end="2022-01-05"
+    # Should delete data for 2022-01-03,04,05 and insert new data
+    # Expected final result: id=2,ds=2022-01-02 (preserved from before) + [10,4,5] for [03,04,05]
+    overwrite_data = pd.DataFrame(
+        [
+            {"id": 10, "ds": "2022-01-03"},
+            {"id": 4, "ds": "2022-01-04"},
+            {"id": 5, "ds": "2022-01-05"},
+        ]
+    )
+
+    adapter.insert_overwrite_by_time_partition(
+        table_name,
+        overwrite_data,
+        start="2022-01-03",
+        end="2022-01-05",
+        time_formatter=lambda x, _: exp.Literal.string(x),
+        time_column="ds",
+        columns_to_types=columns_to_types,
+    )
+
+    # Should have DELETE and INSERT statements for the second operation
+    second_op_statements = executed_statements.copy()
+
+    assert len(second_op_statements) == 2, (
+        f"Expected 2 statements (DELETE + INSERT), got {len(second_op_statements)}"
+    )
+    assert second_op_statements[0].strip().upper().startswith("DELETE"), (
+        f"First should be DELETE: {second_op_statements[0]}"
+    )
+    assert second_op_statements[1].strip().upper().startswith("INSERT"), (
+        f"Second should be INSERT: {second_op_statements[1]}"
+    )
+
+    # Verify the DELETE statements target the correct time ranges
+    first_delete = first_op_statements[0]
+    second_delete = second_op_statements[0]
+
+    # First DELETE should target 2022-01-02 to 2022-01-03 range
+    assert "2022-01-02" in first_delete and "2022-01-03" in first_delete, (
+        f"First DELETE should target 2022-01-02 to 2022-01-03: {first_delete}"
+    )
+
+    # Second DELETE should target 2022-01-03 to 2022-01-05 range
+    assert "2022-01-03" in second_delete and "2022-01-05" in second_delete, (
+        f"Second DELETE should target 2022-01-03 to 2022-01-05: {second_delete}"
+    )
+
+    # The key insight: With DELETE_INSERT strategy, data outside the time range is preserved
+    # This is exactly what the integration test expects - that id=2,ds=2022-01-02 survives
+    # the second operation because 2022-01-02 is outside the 2022-01-03 to 2022-01-05 range
