@@ -682,31 +682,15 @@ def test_create_state_table_sets_delta_column_mapping(
     # Verify create_table was called first
     create_table_mock.assert_called_once_with(table_name, columns_to_types, primary_key=primary_key)
 
-    # Verify execute was called with ALTER TABLE statement to set delta.columnMapping.mode
-    execute_mock.assert_called_once()
-    alter_exp = execute_mock.call_args[0][0]
+    # Verify execute was called twice: once for protocol upgrade, once for column mapping
+    assert execute_mock.call_count == 2
 
-    # Check that it's an ALTER TABLE statement
-    assert isinstance(alter_exp, exp.Alter)
-    assert alter_exp.this.sql(dialect="spark") == "test_state_table"
-    assert alter_exp.kind == "TABLE"
+    # First call should be protocol upgrade
+    first_call = execute_mock.call_args_list[0][0][0]
+    assert "delta.minReaderVersion" in first_call
+    assert "delta.minWriterVersion" in first_call
 
-    # Check that it sets the delta.columnMapping.mode property
-    actions = alter_exp.actions
-    assert len(actions) == 1
-    alter_set = actions[0]
-    assert isinstance(alter_set, exp.AlterSet)
-
-    properties = alter_set.expressions[0]
-    assert isinstance(properties, exp.Properties)
-
-    property_exp = properties.expressions[0]
-    assert isinstance(property_exp, exp.Property)
-
-    # Verify the property name
-    assert property_exp.this.this == "delta.columnMapping.mode"
-
-    # Verify the entire SQL statement looks correct
-    alter_sql = alter_exp.sql(dialect="spark")
-    assert "delta.columnMapping.mode" in alter_sql
-    assert "name" in alter_sql
+    # Second call should be column mapping
+    second_call = execute_mock.call_args_list[1][0][0]
+    assert "delta.columnMapping.mode" in second_call
+    assert "name" in second_call

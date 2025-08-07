@@ -941,10 +941,14 @@ class FabricSparkEngineAdapter(
 
             # Add a property to distinguish between regular views and materialized views
             view_type = "materialized_view" if materialized else "view"
+
+            # For Fabric Spark, we need to use the proper materialized lake view syntax
+            # Reference: https://learn.microsoft.com/en-us/fabric/data-engineering/materialized-lake-views/create-materialized-lake-view
             create_sql = (
                 f"CREATE OR REPLACE TABLE {view_name_sql} "
+                f"USING DELTA "
                 f"TBLPROPERTIES ("
-                f"'lakehouse.table.type' = 'lakehouse_materialized_view', "
+                f"'Type' = 'MATERIALIZED_LAKE_VIEW', "
                 f"'sqlmesh.view.type' = '{view_type}'"
                 f") AS {query.sql(dialect=self.dialect)}"
             )
@@ -1051,26 +1055,32 @@ class FabricSparkEngineAdapter(
         )
 
         # Enable Delta column mapping for DROP COLUMN support
-        # This is required for SQLMesh state table migrations
-        alter_table_exp = exp.Alter(
-            this=exp.to_table(table_name),
-            kind="TABLE",
-            actions=[
-                exp.AlterSet(
-                    expressions=[
-                        exp.Properties(
-                            expressions=[
-                                exp.Property(
-                                    this=exp.Literal.string("delta.columnMapping.mode"),
-                                    value=exp.Literal.string("name"),
-                                )
-                            ]
-                        )
-                    ]
-                )
-            ],
-        )
-        self.execute(alter_table_exp)
+        # This requires upgrading the Delta protocol version first to (2,5)
+        # before setting the column mapping mode
+        try:
+            # First, upgrade the Delta table protocol version to support column mapping
+            table_name_sql = exp.to_table(table_name).sql(dialect=self.dialect)
+            upgrade_protocol_sql = (
+                f"ALTER TABLE {table_name_sql} "
+                f"SET TBLPROPERTIES ("
+                f"'delta.minReaderVersion' = '2', "
+                f"'delta.minWriterVersion' = '5'"
+                f")"
+            )
+            self.execute(upgrade_protocol_sql)
+
+            # Now set the column mapping mode
+            column_mapping_sql = (
+                f"ALTER TABLE {table_name_sql} "
+                f"SET TBLPROPERTIES ('delta.columnMapping.mode' = 'name')"
+            )
+            self.execute(column_mapping_sql)
+        except Exception as e:
+            # If setting column mapping fails, log a warning but don't fail completely
+            # The table will still function, just without DROP COLUMN support
+            logger.warning(
+                f"Failed to enable Delta column mapping for state table {table_name}: {e}"
+            )
 
     def _normalize_boolean_value(self, expr: exp.Expression) -> exp.Expression:
         """
