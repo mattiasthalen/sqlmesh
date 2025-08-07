@@ -91,7 +91,9 @@ class FabricSparkCredentials:
         self.client_secret = client_secret
         self.tenant_id = tenant_id
         self.access_token = access_token
-        self.spark_config = spark_config or {"name": "sqlmesh-session"}
+        self.spark_config = spark_config or {}
+        if "name" not in self.spark_config:
+            self.spark_config["name"] = f"sqlmesh-{database}-{int(time.time())}"
         self.connect_retries = connect_retries
         self.connect_timeout = connect_timeout
 

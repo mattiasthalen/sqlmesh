@@ -2254,7 +2254,7 @@ class FabricSparkConnectionConfig(ConnectionConfig):
     client_secret: t.Optional[str] = None
     tenant_id: t.Optional[str] = None
     access_token: t.Optional[str] = None
-    spark_config: t.Dict[str, t.Any] = {"name": "sqlmesh-session"}
+    spark_config: t.Dict[str, t.Any] = Field(default_factory=dict)
     connect_retries: int = 1
     connect_timeout: int = 10
 
@@ -2266,6 +2266,15 @@ class FabricSparkConnectionConfig(ConnectionConfig):
     DIALECT: t.ClassVar[t.Literal["spark"]] = "spark"
     DISPLAY_NAME: t.ClassVar[t.Literal["Microsoft Fabric Spark"]] = "Microsoft Fabric Spark"
     DISPLAY_ORDER: t.ClassVar[t.Literal[17]] = 17
+
+    @model_validator(mode="after")
+    def _validate_spark_config(self) -> "Self":
+        """Ensure spark_config has the correct session name format."""
+        import time
+
+        if not self.spark_config.get("name"):
+            self.spark_config["name"] = f"sqlmesh-{self.database}-{int(time.time())}"
+        return self
 
     @model_validator(mode="before")
     def _validate_auth_config(cls, data: t.Any) -> t.Any:

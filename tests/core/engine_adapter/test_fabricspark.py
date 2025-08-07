@@ -694,3 +694,109 @@ def test_create_state_table_sets_delta_column_mapping(
     second_call = execute_mock.call_args_list[1][0][0]
     assert "delta.columnMapping.mode" in second_call
     assert "name" in second_call
+
+
+def test_session_naming_format():
+    """Test that Livy session names use the correct format: sqlmesh-{database}-{unix_timestamp}."""
+    import time
+    from sqlmesh.core.engine_adapter.fabricspark import FabricSparkCredentials
+
+    # Test with default spark_config
+    start_time = time.time()
+    credentials = FabricSparkCredentials(
+        workspace_id="test-ws",
+        lakehouse_id="test-lh",
+        database="test_database",
+    )
+    end_time = time.time()
+
+    session_name = credentials.spark_config["name"]
+
+    # Verify format: sqlmesh-{database}-{unix_timestamp}
+    assert session_name.startswith("sqlmesh-test_database-"), (
+        f"Session name should start with 'sqlmesh-test_database-', got: {session_name}"
+    )
+
+    # Extract and verify timestamp
+    parts = session_name.split("-")
+    assert len(parts) == 3, f"Session name should have 3 parts separated by hyphens, got: {parts}"
+    assert parts[0] == "sqlmesh", f"First part should be 'sqlmesh', got: {parts[0]}"
+    assert parts[1] == "test_database", f"Second part should be 'test_database', got: {parts[1]}"
+
+    timestamp_str = parts[2]
+    assert timestamp_str.isdigit(), (
+        f"Third part should be a numeric timestamp, got: {timestamp_str}"
+    )
+
+    timestamp = int(timestamp_str)
+    assert int(start_time) <= timestamp <= int(end_time) + 1, (
+        f"Timestamp should be between {int(start_time)} and {int(end_time)}, got: {timestamp}"
+    )
+
+
+def test_session_naming_with_custom_config():
+    """Test that session names are generated correctly even with custom spark_config."""
+    from sqlmesh.core.engine_adapter.fabricspark import FabricSparkCredentials
+
+    # Test with custom config that doesn't have a name
+    credentials = FabricSparkCredentials(
+        workspace_id="test-ws",
+        lakehouse_id="test-lh",
+        database="my_db",
+        spark_config={"driver_memory": "2g", "executor_memory": "4g"},
+    )
+
+    session_name = credentials.spark_config["name"]
+
+    # Verify the name was generated correctly
+    assert session_name.startswith("sqlmesh-my_db-"), (
+        f"Session name should start with 'sqlmesh-my_db-', got: {session_name}"
+    )
+
+    # Verify other config is preserved
+    assert credentials.spark_config["driver_memory"] == "2g"
+    assert credentials.spark_config["executor_memory"] == "4g"
+
+
+def test_session_naming_preserves_custom_name():
+    """Test that custom session names in spark_config are preserved."""
+    from sqlmesh.core.engine_adapter.fabricspark import FabricSparkCredentials
+
+    custom_name = "my-custom-session-name"
+    credentials = FabricSparkCredentials(
+        workspace_id="test-ws",
+        lakehouse_id="test-lh",
+        database="test_db",
+        spark_config={"name": custom_name, "driver_memory": "1g"},
+    )
+
+    # Verify custom name is preserved
+    assert credentials.spark_config["name"] == custom_name
+    assert credentials.spark_config["driver_memory"] == "1g"
+
+
+def test_connection_config_session_naming():
+    """Test that FabricSparkConnectionConfig generates correct session names."""
+    import time
+
+    start_time = time.time()
+    config = FabricSparkConnectionConfig(
+        workspace_id="test-ws", lakehouse_id="test-lh", database="sqlmesh__fabricspark__test"
+    )
+    end_time = time.time()
+
+    session_name = config.spark_config["name"]
+
+    # Verify format
+    assert session_name.startswith("sqlmesh-sqlmesh__fabricspark__test-"), (
+        f"Session name should start with 'sqlmesh-sqlmesh__fabricspark__test-', got: {session_name}"
+    )
+
+    # Extract and verify timestamp
+    timestamp_str = session_name.split("-")[-1]
+    assert timestamp_str.isdigit(), f"Timestamp should be numeric, got: {timestamp_str}"
+
+    timestamp = int(timestamp_str)
+    assert int(start_time) <= timestamp <= int(end_time) + 1, (
+        f"Timestamp should be between {int(start_time)} and {int(end_time)}, got: {timestamp}"
+    )
