@@ -39,22 +39,19 @@ def test_use_serverless(adapter: FabricSparkEngineAdapter):
 
 def test_get_current_catalog(mocker: MockerFixture, adapter: FabricSparkEngineAdapter):
     """Test getting current catalog."""
-    fetchone_mock = mocker.patch.object(adapter, "fetchone", return_value=("test_catalog",))
+    # The implementation directly returns database from credentials
+    # Mock the database property to return a string value
+    adapter.connection.credentials.database = "test_catalog"
 
-    result = adapter.get_current_catalog()
-
-    # Should try to get current_catalog() first, fallback to spark_catalog
-    assert result in ("test_catalog", "spark_catalog")
-
-
-def test_get_current_catalog_fallback(mocker: MockerFixture, adapter: FabricSparkEngineAdapter):
-    """Test getting current catalog with fallback."""
-    # In the new implementation, it directly returns database from credentials
-    # without trying fetchone, so no mocking needed
     result = adapter.get_current_catalog()
 
     # Should return the database name from connection credentials
-    assert result == adapter.connection.credentials.database
+    assert result == "test_catalog"
+
+    # Test with different catalog name
+    adapter.connection.credentials.database = "another_catalog"
+    result = adapter.get_current_catalog()
+    assert result == "another_catalog"
 
 
 def test_set_current_catalog_not_supported(adapter: FabricSparkEngineAdapter):
