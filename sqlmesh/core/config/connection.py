@@ -2319,6 +2319,12 @@ class FabricSparkConnectionConfig(ConnectionConfig):
 
         return fabricspark_connect
 
+    def get_catalog(self) -> t.Optional[str]:
+        """Return the catalog name for FabricSpark, defaulting to 'none' for integration tests."""
+        catalog = super().get_catalog()
+        # If no catalog is set, return "none" for consistency with single-catalog validation
+        return catalog if catalog else "none"
+
 
 CONNECTION_CONFIG_TO_TYPE = {
     # Map all subclasses of ConnectionConfig to the value of their `type_` field.

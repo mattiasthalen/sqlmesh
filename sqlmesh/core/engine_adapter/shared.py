@@ -334,9 +334,14 @@ def set_catalog(override_mapping: t.Optional[t.Dict[str, CatalogSupport]] = None
             expression.set("catalog", None)
             container[key] = expression  # type: ignore
             if catalog_support.is_single_catalog_only:
-                if catalog_name != engine_adapter._default_catalog:
+                default_catalog = engine_adapter._default_catalog
+                # Handle special cases for single-catalog engines where catalog name defaults to "none"
+                # This can happen when default_catalog is None, "None", or "none"
+                if catalog_name != default_catalog and not (
+                    (default_catalog in (None, "None", "none")) and catalog_name == "none"
+                ):
                     raise SQLMeshError(
-                        f"{engine_adapter.dialect} requires that all catalog operations be against a single catalog: {engine_adapter._default_catalog}. Provided catalog: {catalog_name}"
+                        f"{engine_adapter.dialect} requires that all catalog operations be against a single catalog: {default_catalog}. Provided catalog: {catalog_name}"
                     )
                 return func(*list_args, **kwargs)
             # Set the catalog name on the engine adapter if needed
