@@ -1032,6 +1032,46 @@ class FabricSparkEngineAdapter(
             is_view,
         )
 
+    def create_state_table(
+        self,
+        table_name: str,
+        columns_to_types: t.Dict[str, exp.DataType],
+        primary_key: t.Optional[t.Tuple[str, ...]] = None,
+    ) -> None:
+        """Create a state table with Delta Lake column mapping enabled for FabricSpark.
+
+        FabricSpark uses Delta Lake tables which require column mapping to support
+        DROP COLUMN operations that are used during schema migrations.
+        """
+        # Create the table first using the standard method
+        self.create_table(
+            table_name,
+            columns_to_types,
+            primary_key=primary_key,
+        )
+
+        # Enable Delta column mapping for DROP COLUMN support
+        # This is required for SQLMesh state table migrations
+        alter_table_exp = exp.Alter(
+            this=exp.to_table(table_name),
+            kind="TABLE",
+            actions=[
+                exp.AlterSet(
+                    expressions=[
+                        exp.Properties(
+                            expressions=[
+                                exp.Property(
+                                    this=exp.Literal.string("delta.columnMapping.mode"),
+                                    value=exp.Literal.string("name"),
+                                )
+                            ]
+                        )
+                    ]
+                )
+            ],
+        )
+        self.execute(alter_table_exp)
+
     def _normalize_boolean_value(self, expr: exp.Expression) -> exp.Expression:
         """
         Normalize boolean values for FabricSpark.

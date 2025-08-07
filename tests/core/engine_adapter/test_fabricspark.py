@@ -657,3 +657,56 @@ def test_cursor_fetchdf_empty_result():
     # Should return empty DataFrame
     assert df.empty
     assert len(df.columns) == 0
+
+
+def test_create_state_table_sets_delta_column_mapping(
+    adapter: FabricSparkEngineAdapter, mocker: MockerFixture
+):
+    """Test that create_state_table sets delta.columnMapping.mode to 'name' for DROP COLUMN support."""
+    from sqlglot import exp
+
+    # Mock the create_table and execute methods
+    create_table_mock = mocker.patch.object(adapter, "create_table")
+    execute_mock = mocker.patch.object(adapter, "execute")
+
+    # Call create_state_table
+    table_name = "test_state_table"
+    columns_to_types = {
+        "id": exp.DataType.build("INT"),
+        "name": exp.DataType.build("VARCHAR(100)"),
+    }
+    primary_key = ("id",)
+
+    adapter.create_state_table(table_name, columns_to_types, primary_key)
+
+    # Verify create_table was called first
+    create_table_mock.assert_called_once_with(table_name, columns_to_types, primary_key=primary_key)
+
+    # Verify execute was called with ALTER TABLE statement to set delta.columnMapping.mode
+    execute_mock.assert_called_once()
+    alter_exp = execute_mock.call_args[0][0]
+
+    # Check that it's an ALTER TABLE statement
+    assert isinstance(alter_exp, exp.Alter)
+    assert alter_exp.this.sql(dialect="spark") == "test_state_table"
+    assert alter_exp.kind == "TABLE"
+
+    # Check that it sets the delta.columnMapping.mode property
+    actions = alter_exp.actions
+    assert len(actions) == 1
+    alter_set = actions[0]
+    assert isinstance(alter_set, exp.AlterSet)
+
+    properties = alter_set.expressions[0]
+    assert isinstance(properties, exp.Properties)
+
+    property_exp = properties.expressions[0]
+    assert isinstance(property_exp, exp.Property)
+
+    # Verify the property name
+    assert property_exp.this.this == "delta.columnMapping.mode"
+
+    # Verify the entire SQL statement looks correct
+    alter_sql = alter_exp.sql(dialect="spark")
+    assert "delta.columnMapping.mode" in alter_sql
+    assert "name" in alter_sql
