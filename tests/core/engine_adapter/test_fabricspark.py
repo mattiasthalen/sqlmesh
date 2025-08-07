@@ -4,9 +4,11 @@ from unittest.mock import patch
 
 import pytest
 from pytest_mock.plugin import MockerFixture
+from sqlglot import exp
 
 from sqlmesh.core.engine_adapter.fabricspark import FabricSparkEngineAdapter
 from sqlmesh.core.config.connection import FabricSparkConnectionConfig, parse_connection_config
+from sqlmesh.utils.date import to_time_column
 from sqlmesh.utils.errors import ConfigError
 
 pytestmark = [pytest.mark.fabricspark, pytest.mark.engine]
@@ -567,3 +569,31 @@ def test_normalize_boolean_value_integration_with_normalize_value(
     expected_sql = "CAST(CASE WHEN my_bool THEN '1' ELSE '0' END AS STRING)"
     actual_sql = result.sql(dialect="spark")
     assert actual_sql == expected_sql, f"Expected SQL: {expected_sql}, got: {actual_sql}"
+
+
+def test_to_time_column_timezone_formatting():
+    """Test that FabricSpark formats timezone offsets consistently with other engines."""
+    # Test case from integration test that was failing
+    time_column = "2020-01-01 00:00:00+00:00"
+    time_column_type = exp.DataType.build("TEXT")
+    dialect = "spark"  # FabricSpark uses spark dialect
+    time_column_format = "%Y-%m-%dT%H:%M:%S%z"
+
+    # Call to_time_column function
+    result = to_time_column(time_column, time_column_type, dialect, time_column_format)
+
+    # The result should be a string literal
+    assert isinstance(result, exp.Literal), f"Expected Literal expression, got {type(result)}"
+
+    # The formatted string should use +0000 format (no colon) like other engines
+    expected_value = "2020-01-01T00:00:00+0000"
+    assert result.this == expected_value, f"Expected {expected_value}, got {result.this}"
+
+    # Verify it produces the same result as other dialects
+    for other_dialect in ["postgres", "mysql", "bigquery", "snowflake"]:
+        other_result = to_time_column(
+            time_column, time_column_type, other_dialect, time_column_format
+        )
+        assert other_result.this == result.this, (
+            f"FabricSpark should format timezone same as {other_dialect}"
+        )
