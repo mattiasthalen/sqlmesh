@@ -114,18 +114,17 @@ def test_forward_only_plan_with_effective_date(context_fixture: Context, request
     assert len(plan.new_snapshots) == 2
     assert (
         plan.context_diff.snapshots[snapshot.snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.NON_BREAKING
     )
     assert (
         plan.context_diff.snapshots[top_waiters_snapshot.snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.INDIRECT_NON_BREAKING
     )
+    assert plan.context_diff.snapshots[snapshot.snapshot_id].is_forward_only
+    assert plan.context_diff.snapshots[top_waiters_snapshot.snapshot_id].is_forward_only
+
     assert to_timestamp(plan.start) == to_timestamp("2023-01-07")
     assert plan.missing_intervals == [
-        SnapshotIntervals(
-            snapshot_id=top_waiters_snapshot.snapshot_id,
-            intervals=[(to_timestamp("2023-01-07"), to_timestamp("2023-01-08"))],
-        ),
         SnapshotIntervals(
             snapshot_id=snapshot.snapshot_id,
             intervals=[(to_timestamp("2023-01-07"), to_timestamp("2023-01-08"))],
@@ -256,12 +255,15 @@ def test_forward_only_model_regular_plan(init_and_plan_context: t.Callable):
     assert len(plan.new_snapshots) == 2
     assert (
         plan.context_diff.snapshots[snapshot.snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.NON_BREAKING
     )
     assert (
         plan.context_diff.snapshots[top_waiters_snapshot.snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.INDIRECT_NON_BREAKING
     )
+    assert plan.context_diff.snapshots[snapshot.snapshot_id].is_forward_only
+    assert plan.context_diff.snapshots[top_waiters_snapshot.snapshot_id].is_forward_only
+
     assert plan.start == to_datetime("2023-01-01")
     assert not plan.missing_intervals
 
@@ -362,20 +364,17 @@ def test_forward_only_model_regular_plan_preview_enabled(init_and_plan_context: 
     assert len(plan.new_snapshots) == 2
     assert (
         plan.context_diff.snapshots[snapshot.snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.NON_BREAKING
     )
     assert (
         plan.context_diff.snapshots[top_waiters_snapshot.snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.INDIRECT_NON_BREAKING
     )
+    assert plan.context_diff.snapshots[snapshot.snapshot_id].is_forward_only
+    assert plan.context_diff.snapshots[top_waiters_snapshot.snapshot_id].is_forward_only
+
     assert to_timestamp(plan.start) == to_timestamp("2023-01-07")
     assert plan.missing_intervals == [
-        SnapshotIntervals(
-            snapshot_id=top_waiters_snapshot.snapshot_id,
-            intervals=[
-                (to_timestamp("2023-01-07"), to_timestamp("2023-01-08")),
-            ],
-        ),
         SnapshotIntervals(
             snapshot_id=snapshot.snapshot_id,
             intervals=[
@@ -429,7 +428,12 @@ def test_forward_only_model_restate_full_history_in_dev(init_and_plan_context: t
     context.upsert_model(SqlModel.parse_obj(model_kwargs))
 
     # Apply the model change in dev
-    plan = context.plan_builder("dev", skip_tests=True, enable_preview=False).build()
+    plan = context.plan_builder(
+        "dev",
+        skip_tests=True,
+        enable_preview=False,
+        categorizer_config=CategorizerConfig.all_full(),
+    ).build()
     assert not plan.missing_intervals
     context.apply(plan)
 
@@ -496,55 +500,26 @@ def test_full_history_restatement_model_regular_plan_preview_enabled(
     assert len(plan.new_snapshots) == 6
     assert (
         plan.context_diff.snapshots[snapshot.snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.NON_BREAKING
     )
     assert (
         plan.context_diff.snapshots[customers_snapshot.snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.INDIRECT_NON_BREAKING
     )
     assert (
         plan.context_diff.snapshots[active_customers_snapshot.snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.INDIRECT_NON_BREAKING
     )
     assert (
         plan.context_diff.snapshots[waiter_as_customer_snapshot.snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.INDIRECT_NON_BREAKING
     )
+    assert all(s.is_forward_only for s in plan.new_snapshots)
 
     assert to_timestamp(plan.start) == to_timestamp("2023-01-07")
     assert plan.missing_intervals == [
         SnapshotIntervals(
-            snapshot_id=active_customers_snapshot.snapshot_id,
-            intervals=[
-                (to_timestamp("2023-01-07"), to_timestamp("2023-01-08")),
-            ],
-        ),
-        SnapshotIntervals(
-            snapshot_id=count_customers_active_snapshot.snapshot_id,
-            intervals=[
-                (to_timestamp("2023-01-07"), to_timestamp("2023-01-08")),
-            ],
-        ),
-        SnapshotIntervals(
-            snapshot_id=count_customers_inactive_snapshot.snapshot_id,
-            intervals=[
-                (to_timestamp("2023-01-07"), to_timestamp("2023-01-08")),
-            ],
-        ),
-        SnapshotIntervals(
-            snapshot_id=customers_snapshot.snapshot_id,
-            intervals=[
-                (to_timestamp("2023-01-07"), to_timestamp("2023-01-08")),
-            ],
-        ),
-        SnapshotIntervals(
             snapshot_id=snapshot.snapshot_id,
-            intervals=[
-                (to_timestamp("2023-01-07"), to_timestamp("2023-01-08")),
-            ],
-        ),
-        SnapshotIntervals(
-            snapshot_id=waiter_as_customer_snapshot.snapshot_id,
             intervals=[
                 (to_timestamp("2023-01-07"), to_timestamp("2023-01-08")),
             ],
@@ -788,15 +763,6 @@ def test_cron_not_aligned_with_day_boundary_new_model(init_and_plan_context: t.C
         ),
         SnapshotIntervals(
             snapshot_id=context.get_snapshot(
-                "sushi.top_waiters", raise_if_missing=True
-            ).snapshot_id,
-            intervals=[
-                (to_timestamp("2023-01-06"), to_timestamp("2023-01-07")),
-                (to_timestamp("2023-01-07"), to_timestamp("2023-01-08")),
-            ],
-        ),
-        SnapshotIntervals(
-            snapshot_id=context.get_snapshot(
                 "sushi.waiter_revenue_by_day", raise_if_missing=True
             ).snapshot_id,
             intervals=[
@@ -944,12 +910,13 @@ def test_forward_only_parent_created_in_dev_child_created_in_prod(
     assert len(plan.new_snapshots) == 2
     assert (
         plan.context_diff.snapshots[waiter_revenue_by_day_snapshot.snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.NON_BREAKING
     )
     assert (
         plan.context_diff.snapshots[top_waiters_snapshot.snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.INDIRECT_NON_BREAKING
     )
+    assert all(s.is_forward_only for s in plan.new_snapshots)
     assert plan.start == to_datetime("2023-01-01")
     assert not plan.missing_intervals
 
@@ -1155,18 +1122,15 @@ def test_non_breaking_change_after_forward_only_in_dev(
     assert len(plan.new_snapshots) == 2
     assert (
         plan.context_diff.snapshots[waiter_revenue_by_day_snapshot.snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.NON_BREAKING
     )
     assert (
         plan.context_diff.snapshots[top_waiters_snapshot.snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.INDIRECT_NON_BREAKING
     )
+    assert all(s.is_forward_only for s in plan.new_snapshots)
     assert to_timestamp(plan.start) == to_timestamp("2023-01-07")
     assert plan.missing_intervals == [
-        SnapshotIntervals(
-            snapshot_id=top_waiters_snapshot.snapshot_id,
-            intervals=[(to_timestamp("2023-01-07"), to_timestamp("2023-01-08"))],
-        ),
         SnapshotIntervals(
             snapshot_id=waiter_revenue_by_day_snapshot.snapshot_id,
             intervals=[(to_timestamp("2023-01-07"), to_timestamp("2023-01-08"))],
@@ -1267,11 +1231,17 @@ def test_indirect_non_breaking_change_after_forward_only_in_dev(init_and_plan_co
     context.upsert_model(model)
     snapshot = context.get_snapshot(model, raise_if_missing=True)
 
-    plan = context.plan_builder("dev", skip_tests=True, enable_preview=False).build()
+    plan = context.plan_builder(
+        "dev",
+        skip_tests=True,
+        enable_preview=False,
+        categorizer_config=CategorizerConfig.all_full(),
+    ).build()
     assert (
         plan.context_diff.snapshots[snapshot.snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.BREAKING
     )
+    assert plan.context_diff.snapshots[snapshot.snapshot_id].is_forward_only
     assert not plan.requires_backfill
     context.apply(plan)
 
@@ -1393,7 +1363,7 @@ def test_metadata_change_after_forward_only_results_in_migration(init_and_plan_c
     context.upsert_model(model)
     plan = context.plan("dev", skip_tests=True, auto_apply=True, no_prompts=True)
     assert len(plan.new_snapshots) == 2
-    assert all(s.change_category == SnapshotChangeCategory.FORWARD_ONLY for s in plan.new_snapshots)
+    assert all(s.is_forward_only for s in plan.new_snapshots)
 
     # Follow-up with a metadata change in the same environment
     model = model.copy(update={"owner": "new_owner"})
@@ -1411,7 +1381,7 @@ def test_metadata_change_after_forward_only_results_in_migration(init_and_plan_c
 
 
 @time_machine.travel("2023-01-08 15:00:00 UTC")
-def test_forward_only_precedence_over_indirect_non_breaking(init_and_plan_context: t.Callable):
+def test_indirect_non_breaking_downstream_of_forward_only(init_and_plan_context: t.Callable):
     context, plan = init_and_plan_context("examples/sushi")
     context.apply(plan)
 
@@ -1425,14 +1395,20 @@ def test_forward_only_precedence_over_indirect_non_breaking(init_and_plan_contex
     forward_only_snapshot = context.get_snapshot(forward_only_model, raise_if_missing=True)
 
     non_breaking_model = context.get_model("sushi.waiter_revenue_by_day")
+    non_breaking_model = non_breaking_model.copy(update={"start": "2023-01-01"})
     context.upsert_model(add_projection_to_model(t.cast(SqlModel, non_breaking_model)))
     non_breaking_snapshot = context.get_snapshot(non_breaking_model, raise_if_missing=True)
     top_waiter_snapshot = context.get_snapshot("sushi.top_waiters", raise_if_missing=True)
 
-    plan = context.plan_builder("dev", skip_tests=True, enable_preview=False).build()
+    plan = context.plan_builder(
+        "dev",
+        skip_tests=True,
+        enable_preview=False,
+        categorizer_config=CategorizerConfig.all_full(),
+    ).build()
     assert (
         plan.context_diff.snapshots[forward_only_snapshot.snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.BREAKING
     )
     assert (
         plan.context_diff.snapshots[non_breaking_snapshot.snapshot_id].change_category
@@ -1440,10 +1416,26 @@ def test_forward_only_precedence_over_indirect_non_breaking(init_and_plan_contex
     )
     assert (
         plan.context_diff.snapshots[top_waiter_snapshot.snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.INDIRECT_NON_BREAKING
     )
+    assert plan.context_diff.snapshots[forward_only_snapshot.snapshot_id].is_forward_only
+    assert not plan.context_diff.snapshots[non_breaking_snapshot.snapshot_id].is_forward_only
+    assert not plan.context_diff.snapshots[top_waiter_snapshot.snapshot_id].is_forward_only
+
     assert plan.start == to_timestamp("2023-01-01")
     assert plan.missing_intervals == [
+        SnapshotIntervals(
+            snapshot_id=top_waiter_snapshot.snapshot_id,
+            intervals=[
+                (to_timestamp("2023-01-01"), to_timestamp("2023-01-02")),
+                (to_timestamp("2023-01-02"), to_timestamp("2023-01-03")),
+                (to_timestamp("2023-01-03"), to_timestamp("2023-01-04")),
+                (to_timestamp("2023-01-04"), to_timestamp("2023-01-05")),
+                (to_timestamp("2023-01-05"), to_timestamp("2023-01-06")),
+                (to_timestamp("2023-01-06"), to_timestamp("2023-01-07")),
+                (to_timestamp("2023-01-07"), to_timestamp("2023-01-08")),
+            ],
+        ),
         SnapshotIntervals(
             snapshot_id=non_breaking_snapshot.snapshot_id,
             intervals=[
@@ -2164,15 +2156,15 @@ def test_indirect_non_breaking_view_model_non_representative_snapshot(
     dev_plan = context.plan("dev", auto_apply=True, no_prompts=True, enable_preview=False)
     assert (
         dev_plan.snapshots[forward_only_model_snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.NON_BREAKING
     )
     assert (
         dev_plan.snapshots[full_downstream_model_snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.INDIRECT_NON_BREAKING
     )
     assert (
         dev_plan.snapshots[full_downstream_model_2_snapshot_id].change_category
-        == SnapshotChangeCategory.FORWARD_ONLY
+        == SnapshotChangeCategory.INDIRECT_NON_BREAKING
     )
     assert not dev_plan.missing_intervals
 
@@ -2362,21 +2354,6 @@ def test_indirect_non_breaking_view_model_non_representative_snapshot_migration(
             SnapshotChangeCategory.METADATA,
             SnapshotChangeCategory.METADATA,
             SnapshotChangeCategory.METADATA,
-        ),
-        (
-            SnapshotChangeCategory.FORWARD_ONLY,
-            SnapshotChangeCategory.BREAKING,
-            SnapshotChangeCategory.INDIRECT_BREAKING,
-        ),
-        (
-            SnapshotChangeCategory.BREAKING,
-            SnapshotChangeCategory.FORWARD_ONLY,
-            SnapshotChangeCategory.FORWARD_ONLY,
-        ),
-        (
-            SnapshotChangeCategory.FORWARD_ONLY,
-            SnapshotChangeCategory.FORWARD_ONLY,
-            SnapshotChangeCategory.FORWARD_ONLY,
         ),
     ],
 )
@@ -4538,12 +4515,6 @@ def test_breaking_change(sushi_context: Context):
     validate_query_change(sushi_context, environment, SnapshotChangeCategory.BREAKING, False)
 
 
-def test_forward_only(sushi_context: Context):
-    environment = "dev"
-    initial_add(sushi_context, environment)
-    validate_query_change(sushi_context, environment, SnapshotChangeCategory.FORWARD_ONLY, False)
-
-
 def test_logical_change(sushi_context: Context):
     environment = "dev"
     initial_add(sushi_context, environment)
@@ -4795,8 +4766,11 @@ def test_environment_promotion(sushi_context: Context):
             plan.context_diff.modified_snapshots[sushi_customer_revenue_by_day_snapshot.name][
                 0
             ].change_category
-            == SnapshotChangeCategory.FORWARD_ONLY
+            == SnapshotChangeCategory.NON_BREAKING
         )
+        assert plan.context_diff.snapshots[
+            sushi_customer_revenue_by_day_snapshot.snapshot_id
+        ].is_forward_only
 
     apply_to_environment(
         sushi_context,
@@ -6074,6 +6048,9 @@ def apply_to_environment(
         plan_builder.set_start(plan_start or start(context))
 
     if choice:
+        if choice == SnapshotChangeCategory.FORWARD_ONLY:
+            # FORWARD_ONLY is deprecated, fallback to NON_BREAKING to keep the existing tests
+            choice = SnapshotChangeCategory.NON_BREAKING
         plan_choice(plan_builder, choice)
     for validator in plan_validators:
         validator(context, plan_builder.build())
@@ -7265,3 +7242,265 @@ def test_physical_table_naming_strategy_hash_md5(copy_to_temp_path: t.Callable):
         s.table_naming_convention == TableNamingConvention.HASH_MD5
         for s in prod_env_snapshots.values()
     )
+
+
+@pytest.mark.slow
+def test_default_audits_applied_in_plan(tmp_path: Path):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(exist_ok=True)
+
+    # Create a model with data that will pass the audits
+    create_temp_file(
+        tmp_path,
+        models_dir / "orders.sql",
+        dedent("""
+            MODEL (
+                name test.orders,
+                kind FULL
+            );
+
+            SELECT
+                1 AS order_id,
+                'customer_1' AS customer_id,
+                100.50 AS amount,
+                '2024-01-01'::DATE AS order_date
+            UNION ALL
+            SELECT
+                2 AS order_id,
+                'customer_2' AS customer_id,
+                200.75 AS amount,
+                '2024-01-02'::DATE AS order_date
+        """),
+    )
+
+    config = Config(
+        model_defaults=ModelDefaultsConfig(
+            dialect="duckdb",
+            audits=[
+                "not_null(columns := [order_id, customer_id])",
+                "unique_values(columns := [order_id])",
+            ],
+        )
+    )
+
+    context = Context(paths=tmp_path, config=config)
+
+    # Create and apply plan, here audits should pass
+    plan = context.plan("prod", no_prompts=True)
+    context.apply(plan)
+
+    # Verify model has the default audits
+    model = context.get_model("test.orders")
+    assert len(model.audits) == 2
+
+    audit_names = [audit[0] for audit in model.audits]
+    assert "not_null" in audit_names
+    assert "unique_values" in audit_names
+
+    # Verify audit arguments are preserved
+    for audit_name, audit_args in model.audits:
+        if audit_name == "not_null":
+            assert "columns" in audit_args
+            columns = [col.name for col in audit_args["columns"].expressions]
+            assert "order_id" in columns
+            assert "customer_id" in columns
+        elif audit_name == "unique_values":
+            assert "columns" in audit_args
+            columns = [col.name for col in audit_args["columns"].expressions]
+            assert "order_id" in columns
+
+
+@pytest.mark.slow
+def test_default_audits_fail_on_bad_data(tmp_path: Path):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(exist_ok=True)
+
+    # Create a model with data that violates NOT NULL constraint
+    create_temp_file(
+        tmp_path,
+        models_dir / "bad_orders.sql",
+        dedent("""
+            MODEL (
+                name test.bad_orders,
+                kind FULL
+            );
+
+            SELECT
+                1 AS order_id,
+                NULL AS customer_id,  -- This violates NOT NULL
+                100.50 AS amount,
+                '2024-01-01'::DATE AS order_date
+            UNION ALL
+            SELECT
+                2 AS order_id,
+                'customer_2' AS customer_id,
+                200.75 AS amount,
+                '2024-01-02'::DATE AS order_date
+        """),
+    )
+
+    config = Config(
+        model_defaults=ModelDefaultsConfig(
+            dialect="duckdb", audits=["not_null(columns := [customer_id])"]
+        )
+    )
+
+    context = Context(paths=tmp_path, config=config)
+
+    # Plan should fail due to audit failure
+    with pytest.raises(PlanError):
+        context.plan("prod", no_prompts=True, auto_apply=True)
+
+
+@pytest.mark.slow
+def test_default_audits_with_model_specific_audits(tmp_path: Path):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(exist_ok=True)
+    audits_dir = tmp_path / "audits"
+    audits_dir.mkdir(exist_ok=True)
+
+    create_temp_file(
+        tmp_path,
+        audits_dir / "range_check.sql",
+        dedent("""
+            AUDIT (
+                name range_check
+            );
+
+            SELECT * FROM @this_model
+            WHERE @column < @min_value OR @column > @max_value
+        """),
+    )
+
+    # Create a model with its own audits in addition to defaults
+    create_temp_file(
+        tmp_path,
+        models_dir / "products.sql",
+        dedent("""
+            MODEL (
+                name test.products,
+                kind FULL,
+                audits (
+                    range_check(column := price, min_value := 0, max_value := 10000)
+                )
+            );
+
+            SELECT
+                1 AS product_id,
+                'Widget' AS product_name,
+                99.99 AS price
+            UNION ALL
+            SELECT
+                2 AS product_id,
+                'Gadget' AS product_name,
+                149.99 AS price
+        """),
+    )
+
+    config = Config(
+        model_defaults=ModelDefaultsConfig(
+            dialect="duckdb",
+            audits=[
+                "not_null(columns := [product_id, product_name])",
+                "unique_values(columns := [product_id])",
+            ],
+        )
+    )
+
+    context = Context(paths=tmp_path, config=config)
+
+    # Create and apply plan
+    plan = context.plan("prod", no_prompts=True)
+    context.apply(plan)
+
+    # Verify model has both default and model-specific audits
+    model = context.get_model("test.products")
+    assert len(model.audits) == 3
+
+    audit_names = [audit[0] for audit in model.audits]
+    assert "not_null" in audit_names
+    assert "unique_values" in audit_names
+    assert "range_check" in audit_names
+
+    # Verify audit execution order, default audits first then model-specific
+    assert model.audits[0][0] == "not_null"
+    assert model.audits[1][0] == "unique_values"
+    assert model.audits[2][0] == "range_check"
+
+
+@pytest.mark.slow
+def test_default_audits_with_custom_audit_definitions(tmp_path: Path):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(exist_ok=True)
+    audits_dir = tmp_path / "audits"
+    audits_dir.mkdir(exist_ok=True)
+
+    # Create custom audit definition
+    create_temp_file(
+        tmp_path,
+        audits_dir / "positive_amount.sql",
+        dedent("""
+            AUDIT (
+                name positive_amount
+            );
+
+            SELECT * FROM @this_model
+            WHERE @column <= 0
+        """),
+    )
+
+    # Create a model
+    create_temp_file(
+        tmp_path,
+        models_dir / "transactions.sql",
+        dedent("""
+            MODEL (
+                name test.transactions,
+                kind FULL
+            );
+
+            SELECT
+                1 AS transaction_id,
+                'TXN001' AS transaction_code,
+                250.00 AS amount,
+                '2024-01-01'::DATE AS transaction_date
+            UNION ALL
+            SELECT
+                2 AS transaction_id,
+                'TXN002' AS transaction_code,
+                150.00 AS amount,
+                '2024-01-02'::DATE AS transaction_date
+        """),
+    )
+
+    config = Config(
+        model_defaults=ModelDefaultsConfig(
+            dialect="duckdb",
+            audits=[
+                "not_null(columns := [transaction_id, transaction_code])",
+                "unique_values(columns := [transaction_id])",
+                "positive_amount(column := amount)",
+            ],
+        )
+    )
+
+    context = Context(paths=tmp_path, config=config)
+
+    # Create and apply plan
+    plan = context.plan("prod", no_prompts=True)
+    context.apply(plan)
+
+    # Verify model has all default audits including custom
+    model = context.get_model("test.transactions")
+    assert len(model.audits) == 3
+
+    audit_names = [audit[0] for audit in model.audits]
+    assert "not_null" in audit_names
+    assert "unique_values" in audit_names
+    assert "positive_amount" in audit_names
+
+    # Verify custom audit arguments
+    for audit_name, audit_args in model.audits:
+        if audit_name == "positive_amount":
+            assert "column" in audit_args
+            assert audit_args["column"].name == "amount"
